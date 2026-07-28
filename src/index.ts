@@ -527,7 +527,7 @@ async function handleMcpRequest(request: any): Promise<any> {
               // Fetch changeset page
               const response = await fetch(changesetUrl, {
                 headers: {
-                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                  'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
                 }
               });
 
@@ -581,7 +581,7 @@ async function handleMcpRequest(request: any): Promise<any> {
                   const diffUrl = `${changesetUrl}?format=diff`;
                   const diffResponse = await fetch(diffUrl, {
                     headers: {
-                      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                      'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
                     }
                   });
 
@@ -628,7 +628,7 @@ async function handleMcpRequest(request: any): Promise<any> {
               
               const response = await fetch(timelineUrl, {
                 headers: {
-                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                  'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
                 }
               });
 
@@ -1227,7 +1227,7 @@ async function getChangesetForChatGPT(revision: number, includeDiff: boolean) {
     
     const response = await fetch(changesetUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
       }
     });
 
@@ -1258,7 +1258,7 @@ async function getChangesetForChatGPT(revision: number, includeDiff: boolean) {
         const diffUrl = `${changesetUrl}?format=diff`;
         const diffResponse = await fetch(diffUrl, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
           }
         });
 
@@ -1304,7 +1304,7 @@ async function getTimelineForChatGPT(days: number, limit: number) {
     
     const response = await fetch(timelineUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
       }
     });
 
