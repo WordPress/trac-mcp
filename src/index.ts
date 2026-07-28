@@ -29,6 +29,12 @@ const TICKET_COLUMNS = [
 
 type TracField = typeof TICKET_COLUMNS[number] | 'description';
 type TracRecord = Partial<Record<TracField, string>> & Record<string, string | undefined>;
+type TicketSearchFilters = {
+  status?: string;
+  component?: string;
+  milestone?: string;
+  resolution?: string;
+};
 
 type TicketHistoryEntry = {
   id: number | null;
@@ -133,6 +139,43 @@ function addColumns(url: URL, columns: readonly string[]): void {
   }
 }
 
+function parseTicketFilter(expression: string): [string, string] {
+  const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
+  if (!match?.[1] || !match[2] || !match[3]) {
+    throw new Error(`Invalid ticket filter expression: ${expression}`);
+  }
+
+  const field = match[1].toLowerCase();
+  if (!TICKET_COLUMNS.includes(field as typeof TICKET_COLUMNS[number]) && field !== 'description') {
+    throw new Error(`Unsupported ticket filter: ${field}`);
+  }
+
+  return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
+}
+
+function addTicketSearchQuery(url: URL, query: string): void {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    return;
+  }
+
+  const ticketNumber = trimmedQuery.match(/^#?(\d+)$/);
+  if (ticketNumber?.[1]) {
+    url.searchParams.set('id', ticketNumber[1]);
+    return;
+  }
+
+  if (!/[~=]/.test(trimmedQuery)) {
+    url.searchParams.set('summary', `~${trimmedQuery}`);
+    return;
+  }
+
+  for (const expression of trimmedQuery.split('&')) {
+    const [field, value] = parseTicketFilter(expression);
+    url.searchParams.append(field, value);
+  }
+}
+
 async function fetchCsvRecords(url: URL): Promise<TracRecord[]> {
   const response = await fetch(url.toString(), {
     headers: {
@@ -177,38 +220,51 @@ function ticketFromRecord(record: TracRecord) {
 async function searchTracTickets(
   query: string,
   limit: number,
-  status?: string,
-  component?: string,
+  page: number,
+  filters: TicketSearchFilters = {},
 ) {
   const queryUrl = new URL('https://core.trac.wordpress.org/query');
+  const pageSize = Math.min(Math.max(Math.trunc(limit), 1), 50);
+  const pageNumber = Math.max(Math.trunc(page), 1);
   queryUrl.searchParams.set('format', 'csv');
-  queryUrl.searchParams.set('max', Math.min(Math.max(Math.trunc(limit), 1), 50).toString());
+  queryUrl.searchParams.set('max', pageSize.toString());
+  queryUrl.searchParams.set('page', pageNumber.toString());
   addColumns(queryUrl, ['id', 'summary', 'owner', 'type', 'status', 'priority', 'milestone', 'component']);
 
-  const ticketNumber = query.trim().match(/^#?(\d+)$/);
-  const filter = query.trim().match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
+  addTicketSearchQuery(queryUrl, query);
 
-  if (ticketNumber?.[1]) {
-    queryUrl.searchParams.set('id', ticketNumber[1]);
-  } else if (filter?.[1] && filter[2] && filter[3]) {
-    const field = filter[1].toLowerCase();
-    if (!TICKET_COLUMNS.includes(field as typeof TICKET_COLUMNS[number]) && field !== 'description') {
-      throw new Error(`Unsupported ticket filter: ${field}`);
+  for (const [field, value] of Object.entries(filters)) {
+    if (value) {
+      queryUrl.searchParams.set(field, value);
     }
-    const value = filter[2] === '~=' ? `~${filter[3]}` : filter[3];
-    queryUrl.searchParams.set(field, value);
-  } else {
-    queryUrl.searchParams.set('summary', `~${query}`);
   }
 
-  if (status) {
-    queryUrl.searchParams.set('status', status);
-  }
-  if (component) {
-    queryUrl.searchParams.set('component', component);
+  const totalUrl = new URL(queryUrl);
+  totalUrl.searchParams.delete('format');
+  const [records, totalResponse] = await Promise.all([
+    fetchCsvRecords(queryUrl),
+    fetch(totalUrl.toString(), { headers: { 'User-Agent': TRAC_USER_AGENT } }),
+  ]);
+  if (!totalResponse.ok) {
+    throw new Error(`HTTP ${totalResponse.status}: ${totalResponse.statusText}`);
   }
 
-  return (await fetchCsvRecords(queryUrl)).map(ticketFromRecord);
+  const totalHtml = await totalResponse.text();
+  const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
+  if (!totalMatch?.[1]) {
+    throw new Error('Trac did not return the total ticket count');
+  }
+
+  const totalFound = Number.parseInt(totalMatch[1].replace(/,/g, ''), 10);
+  const tickets = records.map(ticketFromRecord);
+  return {
+    tickets,
+    totalFound,
+    returned: tickets.length,
+    page: pageNumber,
+    pageSize,
+    hasMore: pageNumber * pageSize < totalFound,
+  };
 }
 
 async function fetchTicket(ticketId: number, includeComments: boolean, commentLimit = 10) {
@@ -462,12 +518,17 @@ async function handleMcpRequest(request: any): Promise<any> {
                 properties: {
                   query: {
                     type: "string",
-                    description: "Search query for tickets (keywords or filter expressions like 'summary~=keyword')",
+                    description: "Optional keywords, ticket number, or filter expressions joined by &: milestone=6.9&status=closed",
                   },
                   limit: {
                     type: "number",
                     description: "Maximum number of results to return (default: 10, max: 50)",
                     default: 10,
+                  },
+                  page: {
+                    type: "number",
+                    description: "One-based results page (default: 1)",
+                    default: 1,
                   },
                   status: {
                     type: "string",
@@ -477,8 +538,15 @@ async function handleMcpRequest(request: any): Promise<any> {
                     type: "string", 
                     description: "Filter by component name (e.g., 'Administration', 'Posts, Post Types')",
                   },
+                  milestone: {
+                    type: "string",
+                    description: "Filter by milestone (e.g., '6.9')",
+                  },
+                  resolution: {
+                    type: "string",
+                    description: "Filter by resolution (e.g., 'fixed')",
+                  },
                 },
-                required: ["query"],
               },
             },
             {
@@ -575,11 +643,24 @@ async function handleMcpRequest(request: any): Promise<any> {
         
         switch (name) {
           case "searchTickets": {
-            const { query, limit = 10, status, component } = args;
+            const {
+              query = '',
+              limit = 10,
+              page = 1,
+              status,
+              component,
+              milestone,
+              resolution,
+            } = args;
             
             try {
-              const records = await searchTracTickets(query, limit, status, component);
-              const tickets = records.map((ticket) => ({
+              const search = await searchTracTickets(query, limit, page, {
+                status,
+                component,
+                milestone,
+                resolution,
+              });
+              const tickets = search.tickets.map((ticket) => ({
                 id: ticket.id,
                 title: ticket.summary,
                 text: `#${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status || 'unknown'}\nOwner: ${ticket.owner || 'unassigned'}\nType: ${ticket.type || 'unknown'}\nPriority: ${ticket.priority || 'unknown'}\nMilestone: ${ticket.milestone || 'none'}\nComponent: ${ticket.component || 'unknown'}`,
@@ -597,8 +678,11 @@ async function handleMcpRequest(request: any): Promise<any> {
               result = {
                 results: tickets,
                 query,
-                totalFound: tickets.length,
-                returned: tickets.length,
+                totalFound: search.totalFound,
+                returned: search.returned,
+                page: search.page,
+                pageSize: search.pageSize,
+                hasMore: search.hasMore,
               };
             } catch (error) {
               result = {
@@ -961,8 +1045,8 @@ Query Types:
 
 async function searchTicketsForChatGPT(query: string, limit: number) {
   try {
-    const tickets = await searchTracTickets(query, limit);
-    const results = tickets.map((ticket) => {
+    const search = await searchTracTickets(query, limit, 1);
+    const results = search.tickets.map((ticket) => {
       return {
         id: ticket.id.toString(),
         title: `#${ticket.id}: ${ticket.summary}`,

@@ -46,6 +46,21 @@ Search through WordPress Trac tickets with intelligent filtering.
 `reopened`, or `reviewing`. There is no `open` status; passing one returns an
 empty result set rather than an error. Omit `status` to search every ticket.
 
+Use `&` to combine filter expressions, or pass `status`, `component`,
+`milestone`, and `resolution` as separate arguments. Results include
+`totalFound`, `returned`, `page`, `pageSize`, and `hasMore`.
+
+```json
+{
+  "tool": "searchTickets",
+  "args": {
+    "query": "milestone=6.9&status=closed&resolution=fixed",
+    "limit": 50,
+    "page": 2
+  }
+}
+```
+
 #### getTicket
 Retrieve comprehensive information about specific tickets.
 
