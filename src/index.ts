@@ -59,7 +59,7 @@ async function handleMcpRequest(request: any): Promise<any> {
                   },
                   status: {
                     type: "string",
-                    description: "Filter by ticket status (e.g., 'open', 'closed', 'new')",
+                    description: "Filter by ticket status: accepted, assigned, closed, new, reopened, or reviewing",
                   },
                   component: {
                     type: "string", 
