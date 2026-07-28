@@ -37,10 +37,14 @@ Search through WordPress Trac tickets with intelligent filtering.
   "args": {
     "query": "REST API performance",
     "limit": 10,
-    "status": "open"
+    "status": "new"
   }
 }
 ```
+
+`status` takes a Trac status: `accepted`, `assigned`, `closed`, `new`,
+`reopened`, or `reviewing`. There is no `open` status; passing one returns an
+empty result set rather than an error. Omit `status` to search every ticket.
 
 #### getTicket
 Retrieve comprehensive information about specific tickets.
