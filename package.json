@@ -1,20 +1,22 @@
 {
   "name": "wordpress-trac-mcp-server",
   "version": "1.0.0",
-  "description": "Production-ready Model Context Protocol server for WordPress Trac integration on Cloudflare Workers",
+  "description": "Read-only Model Context Protocol server for WordPress Core Trac",
+  "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "dev": "wrangler dev --compatibility-date 2024-09-23",
-    "start": "wrangler dev --compatibility-date 2024-09-23",
-    "deploy": "wrangler deploy --compatibility-date 2024-09-23",
-    "deploy:production": "wrangler deploy --env production --compatibility-date 2024-09-23",
-    "build": "echo 'Build handled by Wrangler'",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "build": "wrangler deploy --dry-run --env=\"\"",
+    "deploy": "wrangler deploy --env=\"\"",
+    "deploy:production": "wrangler deploy --env production",
     "format": "biome format --write .",
-    "lint": "biome lint .",
-    "lint:fix": "biome lint --apply .",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
     "type-check": "tsc --noEmit",
     "cf-typegen": "wrangler types",
-    "test": "npm run type-check && npm run lint"
+    "test": "vitest run",
+    "check": "pnpm run type-check && pnpm run lint && pnpm run test && pnpm run build"
   },
   "keywords": [
     "mcp",
@@ -29,26 +31,25 @@
   "author": "James LePage",
   "license": "GPL-2.0-or-later",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "@vercel/og": "^0.7.2",
-    "agents": "^0.0.108",
     "zod": "^3.22.4"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.8.3",
     "@cloudflare/workers-types": "^4.20240529.0",
     "typescript": "^5.4.5",
+    "vitest": "^3.2.4",
     "wrangler": "^4.25.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
+  "packageManager": "pnpm@10.28.2",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Jameswlepage/trac-mcp"
+    "url": "https://github.com/WordPress/trac-mcp"
   },
   "bugs": {
-    "url": "https://github.com/Jameswlepage/trac-mcp/issues"
+    "url": "https://github.com/WordPress/trac-mcp/issues"
   },
-  "homepage": "https://github.com/Jameswlepage/trac-mcp#readme"
+  "homepage": "https://github.com/WordPress/trac-mcp#readme"
 }

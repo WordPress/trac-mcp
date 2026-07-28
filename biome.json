@@ -42,7 +42,7 @@
     "formatter": {
       "quoteStyle": "single",
       "jsxQuoteStyle": "double",
-      "trailingComma": "es5",
+      "trailingCommas": "es5",
       "semicolons": "always",
       "arrowParentheses": "always",
       "bracketSpacing": true,
@@ -60,15 +60,7 @@
     }
   },
   "files": {
-    "include": [
-      "src/**/*.ts",
-      "src/**/*.js",
-      "*.json"
-    ],
-    "ignore": [
-      "node_modules/**/*",
-      "dist/**/*",
-      "coverage/**/*"
-    ]
+    "include": ["src/**/*.ts", "src/**/*.js", "*.json"],
+    "ignore": ["node_modules/**/*", "dist/**/*", "coverage/**/*"]
   }
 }

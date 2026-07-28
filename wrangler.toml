@@ -1,87 +1,17 @@
-# Wrangler configuration for WordPress Trac MCP Server
-
 name = "mcp-server-wporg-trac-staging"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# Worker settings
-# [build]
-# command = "npm run build"
-
-# Environment variables (if needed)
 [vars]
 ENVIRONMENT = "development"
 
-# Production environment
 [env.production]
 name = "wordpress-trac-mcp-server-prod"
 vars = { ENVIRONMENT = "production" }
 
-# Specify the account ID and zone ID if needed
-# account_id = "your-account-id"
-# zone_id = "your-zone-id"
-
-# Custom domains (optional)
-# routes = [
-#   { pattern = "trac-mcp.yourdomain.com/*", zone_id = "your-zone-id" }
-# ]
-
-# Analytics and monitoring
-# [analytics_engine_datasets]
-# Uncomment to enable analytics
-# [[analytics_engine_datasets.bindings]]
-# name = "ANALYTICS"
-# dataset = "mcp_analytics"
-
-# Observability
 [observability]
 enabled = true
 
-# Version metadata
 [version_metadata]
 binding = "CF_VERSION_METADATA"
-
-# Limits and resources (commented out for free plan)
-# [limits]
-# cpu_ms = 50000  # 50 seconds max CPU time
-# memory_mb = 128  # 128MB memory limit
-
-# Cron triggers (optional - for maintenance tasks)
-# [[triggers.crons]]
-# cron = "0 0 * * *"  # Daily at midnight
-# name = "daily-maintenance"
-
-# Durable Objects (if you want to add caching later)
-# [[durable_objects.bindings]]
-# name = "CACHE"
-# class_name = "TracCache"
-# script_name = "mcp-server-wporg-trac-staging"
-
-# KV namespaces (for caching)
-# [[kv_namespaces]]
-# binding = "CACHE"
-# id = "your-kv-namespace-id"
-# preview_id = "your-preview-kv-namespace-id"
-
-# D1 databases (if you want to add local storage)
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "trac-mcp-db"
-# database_id = "your-database-id"
-# preview_database_id = "your-preview-database-id"
-
-# R2 buckets (if you want to store large files)
-# [[r2_buckets]]
-# binding = "STORAGE"
-# bucket_name = "trac-mcp-storage"
-# preview_bucket_name = "trac-mcp-storage-preview"
-
-# Vectorize (if you want to add semantic search)
-# [[vectorize]]
-# binding = "VECTORIZE"
-# index_name = "trac-tickets"
-
-# AI bindings (if you want to add AI features)
-# [ai]
-# binding = "AI"
