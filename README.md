@@ -1,251 +1,106 @@
-# WordPress Trac MCP Server
+# WordPress Trac MCP server
 
-A Model Context Protocol (MCP) server that provides AI assistants with comprehensive access to WordPress.org Trac data. Built with TypeScript and deployed on Cloudflare Workers.
+A read-only [Model Context Protocol](https://modelcontextprotocol.io/) server for
+[WordPress Core Trac](https://core.trac.wordpress.org/). It runs as a Cloudflare Worker and uses
+Trac's public HTML, CSV, RSS, and diff endpoints.
 
-**🆕 Now with ChatGPT Deep Research support!**
+Live server:
 
-## Overview
+- Standard MCP: `https://mcp-server-wporg-trac-staging.a8cai.workers.dev/mcp`
+- Search/fetch compatibility: `https://mcp-server-wporg-trac-staging.a8cai.workers.dev/mcp/chatgpt`
+- Health check: `https://mcp-server-wporg-trac-staging.a8cai.workers.dev/health`
 
-This MCP server transforms WordPress Trac into an AI-accessible knowledge base, enabling intelligent queries about WordPress development, ticket tracking, and code changes. Features dual architecture supporting both standard MCP clients and ChatGPT's Deep Research requirements.
+## Tools
 
-## Features
+The standard `/mcp` endpoint provides:
 
-- **Dual Architecture**: Standard MCP + ChatGPT Deep Research support
-- Search 60,000+ WordPress tickets by keywords, components, or status
-- Get detailed ticket information including descriptions, status, and metadata
-- Access changeset information with full diff content
-- Monitor recent WordPress development activity
-- Retrieve project metadata like components, milestones, and priorities
-- **Intelligent Query Routing**: Automatically detects ticket numbers, revisions, and keywords
-- **Smart Caching**: Optimizes fetch operations for better performance
-- WordPress-branded UI with official styling
+| Tool | Purpose |
+| --- | --- |
+| `searchTickets` | Search by keywords, ticket number, or structured filters |
+| `getTicket` | Read a ticket, its metadata, and recent comments |
+| `getChangeset` | Read a changeset and an optional truncated diff |
+| `getTimeline` | Read recent Trac activity |
+| `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
 
-## Available Tools
+The `/mcp/chatgpt` compatibility endpoint provides `search` and `fetch`. Use a bare number for a
+ticket and an `r` prefix for a changeset: `65739` and `r58504`.
 
-The server provides two different tool interfaces depending on your client:
+### Search filters
 
-### Standard MCP Tools
-
-For Claude Desktop, MCP Inspector, and other standard MCP clients:
-
-#### searchTickets
-Search through WordPress Trac tickets with intelligent filtering.
+`searchTickets` accepts plain keywords, ticket numbers, or filter expressions joined with `&`:
 
 ```json
 {
-  "tool": "searchTickets",
-  "args": {
-    "query": "REST API performance",
-    "limit": 10,
-    "status": "new"
-  }
+  "query": "milestone=6.9&status=closed&resolution=fixed",
+  "limit": 50,
+  "page": 2
 }
 ```
 
-`status` takes a Trac status: `accepted`, `assigned`, `closed`, `new`,
-`reopened`, or `reviewing`. There is no `open` status; passing one returns an
-empty result set rather than an error. Omit `status` to search every ticket.
+It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
+separate argument overrides the same field in `query`. Results include pagination metadata.
 
-Use `&` to combine filter expressions, or pass `status`, `component`,
-`milestone`, and `resolution` as separate arguments. Results include
-`totalFound`, `returned`, `page`, `pageSize`, and `hasMore`. A separate
-argument overrides the same field in `query`.
+## Connect
 
-```json
-{
-  "tool": "searchTickets",
-  "args": {
-    "query": "milestone=6.9&status=closed&resolution=fixed",
-    "limit": 50,
-    "page": 2
-  }
-}
-```
-
-#### getTicket
-Retrieve comprehensive information about specific tickets.
-
-```json
-{
-  "tool": "getTicket",
-  "args": {
-    "id": 59166,
-    "includeComments": true,
-    "commentLimit": 10
-  }
-}
-```
-
-#### getChangeset
-Access detailed information about code commits and changes.
-
-```json
-{
-  "tool": "getChangeset",
-  "args": {
-    "revision": 55567,
-    "includeDiff": true,
-    "diffLimit": 2000
-  }
-}
-```
-
-#### getTimeline
-Monitor recent WordPress development activity.
-
-```json
-{
-  "tool": "getTimeline",
-  "args": {
-    "days": 7,
-    "limit": 20
-  }
-}
-```
-
-#### getTracInfo
-Get components, milestones, priorities, severities, ticket types, or statuses.
-
-```json
-{
-  "tool": "getTracInfo",
-  "args": {
-    "type": "components"
-  }
-}
-```
-
-### ChatGPT Deep Research Tools
-
-For ChatGPT's Deep Research feature (simplified interface):
-
-#### search
-Intelligent search that automatically routes to the right data based on your query.
-
-```json
-{
-  "tool": "search",
-  "args": {
-    "query": "block editor performance"
-  }
-}
-```
-
-**Supported query types:**
-- **Keywords**: `"REST API bugs"`, `"media upload issues"`
-- **Ticket numbers**: `"#61234"`, `"61234"`  
-- **Changesets**: `"r58504"`, `"58504"`
-- **Recent activity**: `"recent"`, `"timeline"`, `"latest"`
-- **Components**: `"Block Editor"`, `"REST API"`
-
-#### fetch
-Get detailed information about a specific item by ID.
-
-```json
-{
-  "tool": "fetch",
-  "args": {
-    "id": "61234"
-  }
-}
-```
-
-**Supported ID formats:**
-- Ticket IDs: `"61234"`
-- Changeset revisions: `"r58504"`
-
-## Installation
-
-### Deploy to Cloudflare Workers
-
-```bash
-# Clone the repository
-git clone https://github.com/Jameswlepage/trac-mcp.git
-cd trac-mcp
-
-# Install dependencies
-npm install
-
-# Login to Cloudflare
-wrangler login
-
-# Deploy
-npm run deploy
-```
-
-### Connect to AI Assistant
-
-#### Standard MCP (Claude Desktop, etc.)
-
-Add to your `claude_desktop_config.json`:
+Remote-capable MCP clients can connect directly to the standard endpoint. Clients that need a local
+bridge can use `mcp-remote`:
 
 ```json
 {
   "mcpServers": {
     "wordpress-trac": {
       "command": "npx",
-      "args": ["mcp-remote", "https://your-worker-url/mcp"]
+      "args": [
+        "mcp-remote",
+        "https://mcp-server-wporg-trac-staging.a8cai.workers.dev/mcp"
+      ]
     }
   }
 }
 ```
 
-#### ChatGPT Deep Research
+For ChatGPT, add the compatibility endpoint as a custom app. See
+[OpenAI's current MCP help](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)
+because product labels and setup steps change.
 
-ChatGPT uses a different connection method than Claude Desktop. Follow these steps:
+## Develop
 
-1. **Open ChatGPT Settings** → Go to the **Connectors** tab
-2. **Add Server** → Import your remote MCP server directly:
-   ```
-   https://your-worker-url/mcp/chatgpt
-   ```
-3. **Enable in Composer** → The server will appear in **Composer** > **Deep Research** tool
-4. **Add as Source** → You may need to manually add the server as a research source
-
-For detailed setup instructions, see: [ChatGPT MCP Documentation](https://platform.openai.com/docs/mcp#connect-in-chatgpt)
-
-> **Note**: ChatGPT requires exactly 2 tools (`search` and `fetch`) with simplified schemas. The `/mcp/chatgpt` endpoint is specifically optimized for this requirement.
-
-## Development
-
-### Local Development
+Requirements: Node.js 22 or later and pnpm 10.
 
 ```bash
-# Start development server
-npm run dev
-
-# Test with MCP Inspector
-npx @modelcontextprotocol/inspector http://localhost:8787/mcp
+pnpm install
+pnpm dev
 ```
 
-### Testing
+Run the complete local quality gate:
 
 ```bash
-# Run type checking
-npm run type-check
-
-# Run linting
-npm run lint
-
-# Test deployment
-curl https://your-worker-url/health
+pnpm check
 ```
 
-## Architecture
+This runs TypeScript, Biome, Vitest, and a Cloudflare Worker dry-run build. See
+[docs/testing.md](docs/testing.md) for manual protocol and live-data checks.
 
-- **Runtime**: Cloudflare Workers for global edge deployment
-- **Language**: TypeScript with Zod validation
-- **Protocol**: Model Context Protocol (MCP) for universal AI compatibility
-- **APIs**: Public WordPress Trac CSV/RSS endpoints (no authentication required)
+Deployment requires a configured Cloudflare account:
 
-## Live Demo
+```bash
+pnpm deploy
+pnpm deploy:production
+```
 
-**URL**: https://mcp-server-wporg-trac-staging.a8cai.workers.dev
+## Design and safety
+
+- The server is read-only and has no Trac credentials.
+- Tool inputs receive runtime validation before any upstream request.
+- Upstream requests use the fixed `core.trac.wordpress.org` host.
+- Responses are parsed from public Trac pages and machine-readable formats.
+- The Worker keeps no ticket cache or durable state.
+
+## Contribute
+
+Keep tool schemas, runtime validation, tests, and documentation aligned. Run `pnpm check` before
+opening a pull request.
 
 ## License
 
-This project is licensed under the GNU General Public License v2 or later - see the [GPL License](https://www.gnu.org/licenses/gpl-3.0.en.html#license-text) for details.
-
-## Contributing
-
-Contributions are welcome! This server demonstrates how to build production-ready MCP servers with real-world complexity and WordPress integration.
+GPL-2.0-or-later.

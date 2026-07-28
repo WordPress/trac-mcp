@@ -1,12 +1,52 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 // JSON-RPC 2.0 message schemas
 const JsonRpcRequestSchema = z.object({
-  jsonrpc: z.literal("2.0"),
+  jsonrpc: z.literal('2.0'),
   method: z.string(),
-  params: z.any().optional(),
+  params: z.record(z.unknown()).optional(),
   id: z.union([z.string(), z.number()]).optional(),
 });
+type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
+
+const ToolCallParamsSchema = z.object({
+  name: z.string(),
+  arguments: z.unknown().optional(),
+});
+const SearchTicketsArgsSchema = z.object({
+  query: z.string().max(500).default(''),
+  limit: z.number().int().min(1).max(50).default(10),
+  page: z.number().int().min(1).default(1),
+  status: z.enum(['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing']).optional(),
+  component: z.string().max(100).optional(),
+  milestone: z.string().max(100).optional(),
+  resolution: z.string().max(100).optional(),
+});
+const GetTicketArgsSchema = z.object({
+  id: z.number().int().positive(),
+  includeComments: z.boolean().default(true),
+  commentLimit: z.number().int().min(0).max(50).default(10),
+});
+const GetChangesetArgsSchema = z.object({
+  revision: z.number().int().positive(),
+  includeDiff: z.boolean().default(true),
+  diffLimit: z.number().int().min(0).max(10000).default(2000),
+});
+const GetTimelineArgsSchema = z.object({
+  days: z.number().int().min(1).max(30).default(7),
+  limit: z.number().int().min(1).max(100).default(20),
+});
+const GetTracInfoArgsSchema = z.object({
+  type: z.enum(['components', 'milestones', 'priorities', 'severities', 'types', 'statuses']),
+});
+const ChatGptSearchArgsSchema = z.object({
+  query: z.string().trim().min(1).max(500),
+});
+const ChatGptFetchArgsSchema = z.object({
+  id: z.string().regex(/^(?:r\d+|\d+)$/, 'Use a ticket number or an r-prefixed changeset'),
+});
+
+class UnknownToolError extends Error {}
 
 const TRAC_USER_AGENT = 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)';
 const TICKET_COLUMNS = [
@@ -27,13 +67,13 @@ const TICKET_COLUMNS = [
   'focuses',
 ] as const;
 
-type TracField = typeof TICKET_COLUMNS[number] | 'description';
+type TracField = (typeof TICKET_COLUMNS)[number] | 'description';
 type TracRecord = Partial<Record<TracField, string>> & Record<string, string | undefined>;
 type TicketSearchFilters = {
-  status?: string;
-  component?: string;
-  milestone?: string;
-  resolution?: string;
+  status?: string | undefined;
+  component?: string | undefined;
+  milestone?: string | undefined;
+  resolution?: string | undefined;
 };
 
 type TicketHistoryEntry = {
@@ -81,10 +121,8 @@ function decodeHtmlEntities(value: string): string {
   return decoded;
 }
 
-function cleanTracText(value: string): string {
-  let text = value
-    .replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, '$1')
-    .replace(/^\uFEFF/, '');
+export function cleanTracText(value: string): string {
+  let text = value.replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, '$1').replace(/^\uFEFF/, '');
 
   text = decodeHtmlEntities(text)
     .replace(/<br\s*\/?>/gi, '\n')
@@ -119,10 +157,13 @@ function parseRssItems(rssText: string) {
   });
 }
 
-function parseCsvRecords(csvData: string): TracRecord[] {
+export function parseCsvRecords(csvData: string): TracRecord[] {
   const lines = csvData.trim().split(/\r?\n/);
   const headers = parseCSVLine(lines.shift() ?? '').map((header) =>
-    header.replace(/^\uFEFF/, '').trim().toLowerCase()
+    header
+      .replace(/^\uFEFF/, '')
+      .trim()
+      .toLowerCase()
   );
 
   return lines.filter(Boolean).map((line) => {
@@ -139,21 +180,24 @@ function addColumns(url: URL, columns: readonly string[]): void {
   }
 }
 
-function parseTicketFilter(expression: string): [string, string] {
+export function parseTicketFilter(expression: string): [string, string] {
   const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
     throw new Error(`Invalid ticket filter expression: ${expression}`);
   }
 
   const field = match[1].toLowerCase();
-  if (!TICKET_COLUMNS.includes(field as typeof TICKET_COLUMNS[number]) && field !== 'description') {
+  if (
+    !TICKET_COLUMNS.includes(field as (typeof TICKET_COLUMNS)[number]) &&
+    field !== 'description'
+  ) {
     throw new Error(`Unsupported ticket filter: ${field}`);
   }
 
   return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
 }
 
-function addTicketSearchQuery(url: URL, query: string): void {
+export function addTicketSearchQuery(url: URL, query: string): void {
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
     return;
@@ -180,7 +224,7 @@ async function fetchCsvRecords(url: URL): Promise<TracRecord[]> {
   const response = await fetch(url.toString(), {
     headers: {
       'User-Agent': TRAC_USER_AGENT,
-      'Accept': 'text/csv,text/plain,*/*',
+      Accept: 'text/csv,text/plain,*/*',
       'Accept-Language': 'en-US,en;q=0.9',
     },
   });
@@ -217,11 +261,11 @@ function ticketFromRecord(record: TracRecord) {
   };
 }
 
-async function searchTracTickets(
+export async function searchTracTickets(
   query: string,
   limit: number,
   page: number,
-  filters: TicketSearchFilters = {},
+  filters: TicketSearchFilters = {}
 ) {
   const queryUrl = new URL('https://core.trac.wordpress.org/query');
   const pageSize = Math.min(Math.max(Math.trunc(limit), 1), 50);
@@ -229,7 +273,16 @@ async function searchTracTickets(
   queryUrl.searchParams.set('format', 'csv');
   queryUrl.searchParams.set('max', pageSize.toString());
   queryUrl.searchParams.set('page', pageNumber.toString());
-  addColumns(queryUrl, ['id', 'summary', 'owner', 'type', 'status', 'priority', 'milestone', 'component']);
+  addColumns(queryUrl, [
+    'id',
+    'summary',
+    'owner',
+    'type',
+    'status',
+    'priority',
+    'milestone',
+    'component',
+  ]);
 
   addTicketSearchQuery(queryUrl, query);
 
@@ -246,8 +299,16 @@ async function searchTracTickets(
     fetchCsvRecords(queryUrl),
     fetch(totalUrl.toString(), { headers: { 'User-Agent': TRAC_USER_AGENT } }),
   ]);
+  const tickets = records.map(ticketFromRecord);
   if (!totalResponse.ok) {
-    throw new Error(`HTTP ${totalResponse.status}: ${totalResponse.statusText}`);
+    return {
+      tickets,
+      totalFound: (pageNumber - 1) * pageSize + tickets.length,
+      returned: tickets.length,
+      page: pageNumber,
+      pageSize,
+      hasMore: false,
+    };
   }
 
   const totalHtml = await totalResponse.text();
@@ -257,7 +318,6 @@ async function searchTracTickets(
   }
 
   const totalFound = Number.parseInt(totalMatch[1].replace(/,/g, ''), 10);
-  const tickets = records.map(ticketFromRecord);
   return {
     tickets,
     totalFound,
@@ -310,15 +370,20 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
 function formatTicketResult(
   ticketData: Awaited<ReturnType<typeof fetchTicket>>,
   includeComments: boolean,
-  stringId = false,
+  stringId = false
 ) {
   const { ticket, comments, totalComments } = ticketData;
-  const historyText = includeComments && comments.length > 0
-    ? `\n\nRecent history:\n${comments.map((entry) => {
-        const heading = [entry.timestamp, entry.author, entry.changes].filter(Boolean).join(' — ');
-        return `${heading}\n${entry.comment}`.trim();
-      }).join('\n\n')}`
-    : '';
+  const historyText =
+    includeComments && comments.length > 0
+      ? `\n\nRecent history:\n${comments
+          .map((entry) => {
+            const heading = [entry.timestamp, entry.author, entry.changes]
+              .filter(Boolean)
+              .join(' — ');
+            return `${heading}\n${entry.comment}`.trim();
+          })
+          .join('\n\n')}`
+      : '';
 
   return {
     id: stringId ? ticket.id.toString() : ticket.id,
@@ -364,16 +429,15 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
   const message = cleanTracText(
     html.match(/<dd class="message[^"]*"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? ''
   );
-  const author = cleanTracText(
-    html.match(/<dd class="author"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? ''
-  );
-  const date = cleanTracText(
-    html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? ''
-  ).split('\n')[0]?.trim() ?? '';
+  const author = cleanTracText(html.match(/<dd class="author"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '');
+  const date =
+    cleanTracText(html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '')
+      .split('\n')[0]
+      ?.trim() ?? '';
   const filesSection = html.match(/<dd class="files"[^>]*>([\s\S]*?)<\/ul>\s*<\/dd>/i)?.[1] ?? '';
   const files = Array.from(
     filesSection.matchAll(/<a[^>]*href="\/browser\/[^"]*"[^>]*>([\s\S]*?)<\/a>/gi),
-    (match) => cleanTracText(match[1] ?? ''),
+    (match) => cleanTracText(match[1] ?? '')
   ).filter(Boolean);
 
   let diff = '';
@@ -399,7 +463,7 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
 
 function formatChangesetResult(
   changeset: Awaited<ReturnType<typeof fetchChangeset>>,
-  prefixedId = false,
+  prefixedId = false
 ) {
   const filesText = changeset.files.slice(0, 10).join('\n');
   const summary = changeset.message.split('\n')[0] || 'No message';
@@ -480,657 +544,482 @@ async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
   return Array.from(new Set(values)).sort();
 }
 
+async function fetchTimeline(days: number, limit: number) {
+  const timelineUrl = new URL('https://core.trac.wordpress.org/timeline');
+  timelineUrl.searchParams.set('from', `${days} days ago`);
+  timelineUrl.searchParams.set('max', limit.toString());
+  timelineUrl.searchParams.set('format', 'rss');
+
+  const response = await fetch(timelineUrl.toString(), {
+    headers: { 'User-Agent': TRAC_USER_AGENT },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch timeline: ${response.statusText}`);
+  }
+
+  return parseRssItems(await response.text()).map((item, index) => ({
+    id: item.link || `event-${index}`,
+    title: item.title || 'Unknown Event',
+    text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
+    url: item.link,
+    metadata: {
+      date: item.date,
+      author: item.author,
+      description: item.description,
+    },
+  }));
+}
+
+function jsonRpcResult(id: JsonRpcRequest['id'], result: unknown) {
+  return { jsonrpc: '2.0', id, result };
+}
+
+function jsonRpcError(id: JsonRpcRequest['id'], code: number, message: string) {
+  return { jsonrpc: '2.0', id, error: { code, message } };
+}
+
+function toolResult(id: JsonRpcRequest['id'], result: unknown, isError = false) {
+  return jsonRpcResult(id, {
+    content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    ...(isError ? { isError: true } : {}),
+  });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error';
+}
+
+async function executeStandardTool(name: string, input: unknown): Promise<unknown> {
+  switch (name) {
+    case 'searchTickets': {
+      const { query, limit, page, status, component, milestone, resolution } =
+        SearchTicketsArgsSchema.parse(input ?? {});
+      const search = await searchTracTickets(query, limit, page, {
+        status,
+        component,
+        milestone,
+        resolution,
+      });
+      return {
+        results: search.tickets.map((ticket) => ({
+          id: ticket.id,
+          title: ticket.summary,
+          text: `#${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status || 'unknown'}\nOwner: ${ticket.owner || 'unassigned'}\nType: ${ticket.type || 'unknown'}\nPriority: ${ticket.priority || 'unknown'}\nMilestone: ${ticket.milestone || 'none'}\nComponent: ${ticket.component || 'unknown'}`,
+          url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
+          metadata: {
+            status: ticket.status,
+            owner: ticket.owner,
+            type: ticket.type,
+            priority: ticket.priority,
+            milestone: ticket.milestone,
+            component: ticket.component,
+          },
+        })),
+        query,
+        totalFound: search.totalFound,
+        returned: search.returned,
+        page: search.page,
+        pageSize: search.pageSize,
+        hasMore: search.hasMore,
+      };
+    }
+
+    case 'getTicket': {
+      const { id, includeComments, commentLimit } = GetTicketArgsSchema.parse(input);
+      return formatTicketResult(
+        await fetchTicket(id, includeComments, commentLimit),
+        includeComments
+      );
+    }
+
+    case 'getChangeset': {
+      const { revision, includeDiff, diffLimit } = GetChangesetArgsSchema.parse(input);
+      return formatChangesetResult(await fetchChangeset(revision, includeDiff, diffLimit));
+    }
+
+    case 'getTimeline': {
+      const { days, limit } = GetTimelineArgsSchema.parse(input ?? {});
+      const events = await fetchTimeline(days, limit);
+      return {
+        results: events,
+        totalEvents: events.length,
+        daysBack: days,
+        timelineUrl: 'https://core.trac.wordpress.org/timeline',
+      };
+    }
+
+    case 'getTracInfo': {
+      const { type } = GetTracInfoArgsSchema.parse(input);
+      const data = await fetchTracInfo(type);
+      return {
+        id: type,
+        title: `WordPress Trac ${type}`,
+        text: `${type.charAt(0).toUpperCase() + type.slice(1)} available in WordPress Trac:\n\n${data.join('\n')}`,
+        url: 'https://core.trac.wordpress.org/',
+        metadata: { type, data, total: data.length },
+      };
+    }
+
+    default:
+      throw new UnknownToolError(`Unknown tool: ${name}`);
+  }
+}
 
 /**
  * Handle MCP JSON-RPC 2.0 requests
  */
-async function handleMcpRequest(request: any): Promise<any> {
+export async function handleMcpRequest(request: JsonRpcRequest) {
   const { method, params, id } = request;
+  if (id === undefined) {
+    return null;
+  }
 
   switch (method) {
-    case "initialize":
-      return {
-        jsonrpc: "2.0",
-        id,
-        result: {
-          protocolVersion: "2024-11-05",
-          capabilities: {
-            tools: {},
-            prompts: {},
-          },
-          serverInfo: {
-            name: "WordPress Trac",
-            version: "1.0.0",
-          },
+    case 'initialize':
+      return jsonRpcResult(id, {
+        protocolVersion: '2024-11-05',
+        capabilities: {
+          tools: {},
         },
-      };
+        serverInfo: {
+          name: 'WordPress Trac',
+          version: '1.0.0',
+        },
+      });
 
-    case "tools/list":
+    case 'tools/list':
       return {
-        jsonrpc: "2.0",
+        jsonrpc: '2.0',
         id,
         result: {
           tools: [
             {
-              name: "searchTickets",
-              description: "Search for WordPress Trac tickets by keyword or filter expression. Returns ticket summaries with basic info.",
+              name: 'searchTickets',
+              description:
+                'Search for WordPress Trac tickets by keyword or filter expression. Returns ticket summaries with basic info.',
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   query: {
-                    type: "string",
-                    description: "Optional keywords, ticket number, or filter expressions joined by &: milestone=6.9&status=closed",
+                    type: 'string',
+                    description:
+                      'Optional keywords, ticket number, or filter expressions joined by &: milestone=6.9&status=closed',
                   },
                   limit: {
-                    type: "number",
-                    description: "Maximum number of results to return (default: 10, max: 50)",
+                    type: 'number',
+                    description: 'Maximum number of results to return (default: 10, max: 50)',
                     default: 10,
                   },
                   page: {
-                    type: "number",
-                    description: "One-based results page (default: 1)",
+                    type: 'number',
+                    description: 'One-based results page (default: 1)',
                     default: 1,
                   },
                   status: {
-                    type: "string",
-                    description: "Filter by ticket status: accepted, assigned, closed, new, reopened, or reviewing",
+                    type: 'string',
+                    description:
+                      'Filter by ticket status: accepted, assigned, closed, new, reopened, or reviewing',
                   },
                   component: {
-                    type: "string", 
-                    description: "Filter by component name (e.g., 'Administration', 'Posts, Post Types')",
+                    type: 'string',
+                    description:
+                      "Filter by component name (e.g., 'Administration', 'Posts, Post Types')",
                   },
                   milestone: {
-                    type: "string",
+                    type: 'string',
                     description: "Filter by milestone (e.g., '6.9')",
                   },
                   resolution: {
-                    type: "string",
+                    type: 'string',
                     description: "Filter by resolution (e.g., 'fixed')",
                   },
                 },
               },
             },
             {
-              name: "getTicket",
-              description: "Get detailed information about a specific WordPress Trac ticket including description, comments, and metadata.",
+              name: 'getTicket',
+              description:
+                'Get detailed information about a specific WordPress Trac ticket including description, comments, and metadata.',
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   id: {
-                    type: "number",
-                    description: "Trac ticket ID number",
+                    type: 'number',
+                    description: 'Trac ticket ID number',
                   },
                   includeComments: {
-                    type: "boolean",
-                    description: "Include ticket comments and discussion (default: true)",
+                    type: 'boolean',
+                    description: 'Include ticket comments and discussion (default: true)',
                     default: true,
                   },
                   commentLimit: {
-                    type: "number",
-                    description: "Maximum number of comments to return (default: 10, max: 50)",
+                    type: 'number',
+                    description: 'Maximum number of comments to return (default: 10, max: 50)',
                     default: 10,
                   },
                 },
-                required: ["id"],
+                required: ['id'],
               },
             },
             {
-              name: "getChangeset",
-              description: "Get information about a specific WordPress code changeset/commit including commit message, author, and diff.",
+              name: 'getChangeset',
+              description:
+                'Get information about a specific WordPress code changeset/commit including commit message, author, and diff.',
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   revision: {
-                    type: "number",
-                    description: "SVN revision number (e.g., 58504)",
+                    type: 'number',
+                    description: 'SVN revision number (e.g., 58504)',
                   },
                   includeDiff: {
-                    type: "boolean",
-                    description: "Include diff content (default: true)",
+                    type: 'boolean',
+                    description: 'Include diff content (default: true)',
                     default: true,
                   },
                   diffLimit: {
-                    type: "number",
-                    description: "Maximum characters of diff to return (default: 2000, max: 10000)",
+                    type: 'number',
+                    description: 'Maximum characters of diff to return (default: 2000, max: 10000)',
                     default: 2000,
                   },
                 },
-                required: ["revision"],
+                required: ['revision'],
               },
             },
             {
-              name: "getTimeline",
-              description: "Get recent activity from WordPress Trac timeline including recent tickets, commits, and other events.",
+              name: 'getTimeline',
+              description:
+                'Get recent activity from WordPress Trac timeline including recent tickets, commits, and other events.',
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   days: {
-                    type: "number",
-                    description: "Number of days to look back (default: 7, max: 30)",
+                    type: 'number',
+                    description: 'Number of days to look back (default: 7, max: 30)',
                     default: 7,
                   },
                   limit: {
-                    type: "number",
-                    description: "Maximum number of events to return (default: 20, max: 100)",
+                    type: 'number',
+                    description: 'Maximum number of events to return (default: 20, max: 100)',
                     default: 20,
                   },
                 },
               },
             },
             {
-              name: "getTracInfo",
-              description: "Get WordPress Trac components, milestones, priorities, severities, ticket types, or statuses.",
+              name: 'getTracInfo',
+              description:
+                'Get WordPress Trac components, milestones, priorities, severities, ticket types, or statuses.',
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   type: {
-                    type: "string",
-                    enum: ["components", "milestones", "priorities", "severities", "types", "statuses"],
-                    description: "Type of Trac information to retrieve",
+                    type: 'string',
+                    enum: [
+                      'components',
+                      'milestones',
+                      'priorities',
+                      'severities',
+                      'types',
+                      'statuses',
+                    ],
+                    description: 'Type of Trac information to retrieve',
                   },
                 },
-                required: ["type"],
+                required: ['type'],
               },
             },
           ],
         },
       };
 
-    case "tools/call":
-      const { name, arguments: args } = params;
-      
-      try {
-        let result;
-        
-        switch (name) {
-          case "searchTickets": {
-            const {
-              query = '',
-              limit = 10,
-              page = 1,
-              status,
-              component,
-              milestone,
-              resolution,
-            } = args;
-            
-            try {
-              const search = await searchTracTickets(query, limit, page, {
-                status,
-                component,
-                milestone,
-                resolution,
-              });
-              const tickets = search.tickets.map((ticket) => ({
-                id: ticket.id,
-                title: ticket.summary,
-                text: `#${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status || 'unknown'}\nOwner: ${ticket.owner || 'unassigned'}\nType: ${ticket.type || 'unknown'}\nPriority: ${ticket.priority || 'unknown'}\nMilestone: ${ticket.milestone || 'none'}\nComponent: ${ticket.component || 'unknown'}`,
-                url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
-                metadata: {
-                  status: ticket.status,
-                  owner: ticket.owner,
-                  type: ticket.type,
-                  priority: ticket.priority,
-                  milestone: ticket.milestone,
-                  component: ticket.component,
-                },
-              }));
+    case 'ping':
+      return jsonRpcResult(id, {});
 
-              result = {
-                results: tickets,
-                query,
-                totalFound: search.totalFound,
-                returned: search.returned,
-                page: search.page,
-                pageSize: search.pageSize,
-                hasMore: search.hasMore,
-              };
-            } catch (error) {
-              result = {
-                results: [],
-                query,
-                error: error instanceof Error ? error.message : 'Unknown error',
-              };
-            }
-            break;
-          }
-
-          case "getTicket": {
-            const { id, includeComments = true, commentLimit = 10 } = args;
-            
-            try {
-              const ticketData = await fetchTicket(id, includeComments, commentLimit);
-              result = formatTicketResult(ticketData, includeComments);
-            } catch (error) {
-              result = {
-                id: id,
-                title: `Error loading ticket ${id}`,
-                text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                url: `https://core.trac.wordpress.org/ticket/${id}`,
-                metadata: { error: true },
-              };
-            }
-            break;
-          }
-
-          case "getChangeset": {
-            const { revision, includeDiff = true, diffLimit = 2000 } = args;
-            
-            try {
-              const changeset = await fetchChangeset(revision, includeDiff, diffLimit);
-              result = formatChangesetResult(changeset);
-            } catch (error) {
-              result = {
-                id: revision.toString(),
-                title: `Error loading changeset ${revision}`,
-                text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                url: `https://core.trac.wordpress.org/changeset/${revision}`,
-                metadata: { error: true },
-              };
-            }
-            break;
-          }
-
-          case "getTimeline": {
-            const { days = 7, limit = 20 } = args;
-            
-            try {
-              const timelineUrl = `https://core.trac.wordpress.org/timeline?from=${days}%2Bdays+ago&max=${Math.min(limit, 100)}&format=rss`;
-              
-              const response = await fetch(timelineUrl, {
-                headers: {
-                  'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
-                }
-              });
-
-              if (!response.ok) {
-                throw new Error(`Failed to fetch timeline: ${response.statusText}`);
-              }
-
-              const rssText = await response.text();
-              const events = parseRssItems(rssText).map((item, index) => ({
-                id: item.link || `event-${index}`,
-                title: item.title || 'Unknown Event',
-                text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
-                url: item.link,
-                metadata: {
-                  date: item.date,
-                  author: item.author,
-                  description: item.description,
-                },
-              }));
-
-              result = {
-                results: events,
-                totalEvents: events.length,
-                daysBack: days,
-                timelineUrl: 'https://core.trac.wordpress.org/timeline',
-              };
-            } catch (error) {
-              result = {
-                results: [],
-                error: error instanceof Error ? error.message : 'Unknown error',
-                daysBack: days,
-                timelineUrl: 'https://core.trac.wordpress.org/timeline',
-              };
-            }
-            break;
-          }
-
-          case "getTracInfo": {
-            const { type } = args;
-            
-            try {
-              const data = await fetchTracInfo(type as TracInfoType);
-
-              result = {
-                id: type,
-                title: `WordPress Trac ${type}`,
-                text: `${type.charAt(0).toUpperCase() + type.slice(1)} available in WordPress Trac:\n\n${data.join('\n')}`,
-                url: 'https://core.trac.wordpress.org/',
-                metadata: {
-                  type,
-                  data,
-                  total: data.length,
-                },
-              };
-            } catch (error) {
-              result = {
-                id: type,
-                title: `Error loading ${type}`,
-                text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}. Available types: components, milestones, priorities, severities, types, statuses`,
-                url: 'https://core.trac.wordpress.org/',
-                metadata: { error: true },
-              };
-            }
-            break;
-          }
-
-          default:
-            throw new Error(`Unknown tool: ${name}`);
-        }
-
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            content: [{
-              type: "text",
-              text: JSON.stringify(result, null, 2)
-            }],
-          },
-        };
-      } catch (error) {
-        return {
-          jsonrpc: "2.0",
-          id,
-          error: {
-            code: -32603,
-            message: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          },
-        };
+    case 'tools/call': {
+      const parsed = ToolCallParamsSchema.safeParse(params);
+      if (!parsed.success) {
+        return jsonRpcError(id, -32602, 'Invalid tools/call parameters');
       }
 
+      try {
+        return toolResult(id, await executeStandardTool(parsed.data.name, parsed.data.arguments));
+      } catch (error) {
+        if (error instanceof UnknownToolError || error instanceof z.ZodError) {
+          return jsonRpcError(id, -32602, errorMessage(error));
+        }
+        return toolResult(id, { error: errorMessage(error) }, true);
+      }
+    }
+
     default:
-      return {
-        jsonrpc: "2.0",
-        id,
-        error: {
-          code: -32601,
-          message: `Method not found: ${method}`,
-        },
-      };
+      return jsonRpcError(id, -32601, `Method not found: ${method}`);
   }
 }
 
 /**
  * Handle ChatGPT-specific MCP JSON-RPC 2.0 requests
- * Follows OpenAI's requirements for Deep Research: simplified tools (search, fetch) and OpenAI response format
+ * Provides the search and fetch compatibility tools.
  */
-async function handleChatGPTMcpRequest(request: any): Promise<any> {
+export async function handleChatGPTMcpRequest(request: JsonRpcRequest) {
   const { method, params, id } = request;
+  if (id === undefined) {
+    return null;
+  }
 
   switch (method) {
-    case "initialize":
-      return {
-        jsonrpc: "2.0",
-        id,
-        result: {
-          protocolVersion: "2024-11-05",
-          capabilities: {
-            tools: {},
-          },
-          serverInfo: {
-            name: "WordPress Trac",
-            version: "1.0.0",
-          },
+    case 'initialize':
+      return jsonRpcResult(id, {
+        protocolVersion: '2024-11-05',
+        capabilities: {
+          tools: {},
         },
-      };
+        serverInfo: {
+          name: 'WordPress Trac',
+          version: '1.0.0',
+        },
+      });
 
-    case "tools/list":
+    case 'tools/list':
       return {
-        jsonrpc: "2.0",
+        jsonrpc: '2.0',
         id,
         result: {
           tools: [
             {
-              name: "search",
+              name: 'search',
               description: `Search WordPress Trac for tickets, changesets, and timeline activity.
 
 Query Types:
 - Ticket searches: Use keywords like "block editor", "media upload", "REST API" to find related tickets
 - Specific tickets: Use ticket numbers like "#61234" or "61234" to find specific tickets
-- Changesets: Use revision numbers like "r58504" or "58504" to find code changes
+- Changesets: Use r-prefixed revision numbers like "r58504" to find code changes
 - Recent activity: Use terms like "recent", "timeline", "latest" to see recent Trac activity
 - Components: Search by component like "REST API", "Block Editor", "Media" to find tickets in that area`,
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   query: {
-                    type: "string",
-                    description: "Search query for WordPress Trac. Can be keywords, ticket numbers, revision numbers, or component names.",
-                  }
+                    type: 'string',
+                    description:
+                      'Search query for WordPress Trac. Can be keywords, ticket numbers, revision numbers, or component names.',
+                  },
                 },
-                required: ["query"]
-              }
+                required: ['query'],
+              },
             },
             {
-              name: "fetch",
-              description: "Retrieve detailed information about a specific WordPress Trac item by its ID.",
+              name: 'fetch',
+              description:
+                'Retrieve detailed information about a specific WordPress Trac item by its ID.',
               inputSchema: {
-                type: "object",
+                type: 'object',
                 properties: {
                   id: {
-                    type: "string",
-                    description: "The ID of the item to fetch detailed information for (e.g., '61234' for ticket, 'r58504' for changeset).",
-                  }
+                    type: 'string',
+                    description:
+                      "The ID of the item to fetch detailed information for (e.g., '61234' for ticket, 'r58504' for changeset).",
+                  },
                 },
-                required: ["id"]
-              }
-            }
+                required: ['id'],
+              },
+            },
           ],
         },
       };
 
-    case "tools/call":
-      const { name, arguments: args } = params;
-      
-      try {
-        let result: any;
-        
-        switch (name) {
-          case "search": {
-            const { query } = args;
-            
-            try {
-              // Intelligent query routing based on patterns
-              const isTicketNumber = /^#?(\d+)$/.test(query.trim());
-              const isRevisionNumber = /^r?(\d+)$/.test(query.trim()) && query.includes('r');
-              const isTimelineQuery = /\b(recent|timeline|latest|activity)\b/i.test(query);
-              
-              let searchResults: any[] = [];
-              
-              if (isTicketNumber) {
-                // Direct ticket lookup
-                const ticketId = Number.parseInt(query.replace('#', ''), 10);
-                const ticketResult = await getTicketForChatGPT(ticketId, false);
-                if (ticketResult && !('error' in ticketResult.metadata)) {
-                  searchResults = [ticketResult];
-                }
-              } else if (isRevisionNumber) {
-                // Direct changeset lookup
-                const revision = Number.parseInt(query.replace('r', ''), 10);
-                const changesetResult = await getChangesetForChatGPT(revision, false);
-                if (changesetResult && !('error' in changesetResult.metadata)) {
-                  searchResults = [changesetResult];
-                }
-              } else if (isTimelineQuery) {
-                // Timeline search
-                const timelineResults = await getTimelineForChatGPT(7, 20);
-                searchResults = timelineResults.results || [];
-              } else {
-                // Keyword search for tickets
-                const ticketResults = await searchTicketsForChatGPT(query, 10);
-                searchResults = ticketResults.results || [];
-                
-              }
+    case 'ping':
+      return jsonRpcResult(id, {});
 
-              result = {
-                results: searchResults,
-                query,
-                totalFound: searchResults.length,
-              };
-            } catch (error) {
-              result = {
-                results: [],
-                query,
-                error: error instanceof Error ? error.message : 'Unknown error',
-              };
-            }
-            break;
-          }
-
-          case "fetch": {
-            const { id } = args;
-            
-            try {
-              // Determine if it's a ticket, changeset, or cached item
-              const isRevision = /^r?\d+$/.test(id) && id.includes('r');
-              const isTicketId = /^\d+$/.test(id);
-              
-              let fetchResult: any;
-              
-              if (isRevision) {
-                // Fetch changeset details
-                const revision = Number.parseInt(id.replace('r', ''), 10);
-                fetchResult = await getChangesetForChatGPT(revision, true);
-              } else if (isTicketId) {
-                // Fetch ticket details
-                const ticketId = Number.parseInt(id, 10);
-                fetchResult = await getTicketForChatGPT(ticketId, true);
-              } else {
-                throw new Error(`Invalid ID format: ${id}`);
-              }
-
-              result = fetchResult;
-            } catch (error) {
-              result = {
-                id: id,
-                title: `Error loading ${id}`,
-                text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                url: 'https://core.trac.wordpress.org/',
-                metadata: { error: true },
-              };
-            }
-            break;
-          }
-
-          default:
-            throw new Error(`Unknown tool: ${name}`);
-        }
-
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            content: [{
-              type: "text",
-              text: JSON.stringify(result, null, 2)
-            }],
-          },
-        };
-      } catch (error) {
-        return {
-          jsonrpc: "2.0",
-          id,
-          error: {
-            code: -32603,
-            message: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          },
-        };
+    case 'tools/call': {
+      const parsed = ToolCallParamsSchema.safeParse(params);
+      if (!parsed.success) {
+        return jsonRpcError(id, -32602, 'Invalid tools/call parameters');
       }
 
+      try {
+        return toolResult(id, await executeChatGptTool(parsed.data.name, parsed.data.arguments));
+      } catch (error) {
+        if (error instanceof UnknownToolError || error instanceof z.ZodError) {
+          return jsonRpcError(id, -32602, errorMessage(error));
+        }
+        return toolResult(id, { error: errorMessage(error) }, true);
+      }
+    }
+
     default:
-      return {
-        jsonrpc: "2.0",
-        id,
-        error: {
-          code: -32601,
-          message: `Method not found: ${method}`,
-        },
-      };
+      return jsonRpcError(id, -32601, `Method not found: ${method}`);
   }
 }
 
-// Helper functions for ChatGPT response formatting
-
 async function searchTicketsForChatGPT(query: string, limit: number) {
-  try {
-    const search = await searchTracTickets(query, limit, 1);
-    const results = search.tickets.map((ticket) => {
-      return {
-        id: ticket.id.toString(),
-        title: `#${ticket.id}: ${ticket.summary}`,
-        text: `Ticket #${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status}\nType: ${ticket.type}\nPriority: ${ticket.priority}\nOwner: ${ticket.owner}\nMilestone: ${ticket.milestone}`,
-        url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
-        metadata: { ticket },
-      };
-    });
-
-    return { results };
-  } catch (error) {
-    return { results: [], error: error instanceof Error ? error.message : 'Unknown error' };
-  }
+  const search = await searchTracTickets(query, limit, 1);
+  return {
+    results: search.tickets.map((ticket) => ({
+      id: ticket.id.toString(),
+      title: `#${ticket.id}: ${ticket.summary}`,
+      text: `Ticket #${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status}\nType: ${ticket.type}\nPriority: ${ticket.priority}\nOwner: ${ticket.owner}\nMilestone: ${ticket.milestone}`,
+      url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
+      metadata: { ticket },
+    })),
+    totalFound: search.totalFound,
+  };
 }
 
 async function getTicketForChatGPT(ticketId: number, includeComments: boolean) {
-  try {
-    const ticketData = await fetchTicket(ticketId, includeComments);
-    return formatTicketResult(ticketData, includeComments, true);
-  } catch (error) {
-    return {
-      id: ticketId.toString(),
-      title: `Error loading ticket ${ticketId}`,
-      text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      url: `https://core.trac.wordpress.org/ticket/${ticketId}`,
-      metadata: { error: true },
-    };
-  }
+  const ticketData = await fetchTicket(ticketId, includeComments);
+  return formatTicketResult(ticketData, includeComments, true);
 }
 
 async function getChangesetForChatGPT(revision: number, includeDiff: boolean) {
-  try {
-    const changeset = await fetchChangeset(revision, includeDiff);
-    return formatChangesetResult(changeset, true);
-  } catch (error) {
-    return {
-      id: `r${revision}`,
-      title: `Error loading changeset ${revision}`,
-      text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      url: `https://core.trac.wordpress.org/changeset/${revision}`,
-      metadata: { error: true },
-    };
-  }
+  const changeset = await fetchChangeset(revision, includeDiff);
+  return formatChangesetResult(changeset, true);
 }
 
 async function getTimelineForChatGPT(days: number, limit: number) {
-  try {
-    const timelineUrl = `https://core.trac.wordpress.org/timeline?from=${days}%2Bdays+ago&max=${Math.min(limit, 100)}&format=rss`;
-    
-    const response = await fetch(timelineUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)'
-      }
-    });
+  return { results: await fetchTimeline(days, limit) };
+}
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch timeline: ${response.statusText}`);
+async function runChatGptSearch(query: string) {
+  const trimmed = query.trim();
+  if (/^#?\d+$/.test(trimmed)) {
+    const ticket = await getTicketForChatGPT(Number.parseInt(trimmed.replace('#', ''), 10), false);
+    return { results: [ticket], query, totalFound: 1 };
+  }
+  if (/^r\d+$/i.test(trimmed)) {
+    const changeset = await getChangesetForChatGPT(Number.parseInt(trimmed.slice(1), 10), false);
+    return { results: [changeset], query, totalFound: 1 };
+  }
+  if (/\b(recent|timeline|latest|activity)\b/i.test(trimmed)) {
+    const timeline = await getTimelineForChatGPT(7, 20);
+    return { results: timeline.results, query, totalFound: timeline.results.length };
+  }
+
+  const tickets = await searchTicketsForChatGPT(query, 10);
+  return { results: tickets.results, query, totalFound: tickets.totalFound };
+}
+
+async function executeChatGptTool(name: string, input: unknown): Promise<unknown> {
+  switch (name) {
+    case 'search': {
+      const { query } = ChatGptSearchArgsSchema.parse(input);
+      return runChatGptSearch(query);
     }
-
-    const rssText = await response.text();
-    const results = parseRssItems(rssText).map((item, index) => ({
-      id: item.link || `event-${index}`,
-      title: item.title || 'Unknown Event',
-      text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
-      url: item.link,
-      metadata: {
-        date: item.date,
-        author: item.author,
-        description: item.description,
-      },
-    }));
-
-    return { results };
-  } catch (error) {
-    return { results: [], error: error instanceof Error ? error.message : 'Unknown error' };
+    case 'fetch': {
+      const { id } = ChatGptFetchArgsSchema.parse(input);
+      return id.startsWith('r')
+        ? getChangesetForChatGPT(Number.parseInt(id.slice(1), 10), true)
+        : getTicketForChatGPT(Number.parseInt(id, 10), true);
+    }
+    default:
+      throw new UnknownToolError(`Unknown tool: ${name}`);
   }
 }
 
 // Simple CSV parser helper
 function parseCSVLine(line: string): string[] {
-  return Array.from(
-    line.matchAll(/(?:^|,)(?:"((?:[^"]|"")*)"|([^",]*))/g),
-    (match) => (match[1] ?? match[2] ?? '').replace(/""/g, '"').trim(),
+  return Array.from(line.matchAll(/(?:^|,)(?:"((?:[^"]|"")*)"|([^",]*))/g), (match) =>
+    (match[1] ?? match[2] ?? '').replace(/""/g, '"').trim()
   );
 }
 
@@ -1327,11 +1216,15 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
   
   <div class="footer">
     <p><a href="https://core.trac.wordpress.org/">WordPress Trac</a> • <a href="https://modelcontextprotocol.io/">MCP Docs</a> • an experiment by <a href="https://automattic.ai">A8C AI</a></p>
-    ${versionInfo ? `<p style="margin-top: 0.5rem; font-size: 0.8rem; color: #999;">
+    ${
+      versionInfo
+        ? `<p style="margin-top: 0.5rem; font-size: 0.8rem; color: #999;">
       Version: <code style="font-size: 0.8rem;">${versionInfo.id.substring(0, 8)}</code>
       ${versionInfo.tag ? ` • Tag: <code style="font-size: 0.8rem;">${versionInfo.tag}</code>` : ''}
       • Deployed: ${new Date(versionInfo.timestamp).toLocaleString()}
-    </p>` : ''}
+    </p>`
+        : ''
+    }
   </div>
 </body>
 </html>
@@ -1348,40 +1241,91 @@ interface Env {
   };
 }
 
+const MCP_CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, MCP-Protocol-Version',
+};
+
+async function handleMcpHttpRequest(request: Request, chatGpt: boolean): Promise<Response> {
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: MCP_CORS_HEADERS });
+  }
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', {
+      status: 405,
+      headers: { ...MCP_CORS_HEADERS, Allow: 'POST, OPTIONS' },
+    });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(JSON.stringify(jsonRpcError(undefined, -32700, 'Parse error')), {
+      status: 400,
+      headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
+    });
+  }
+
+  const parsed = JsonRpcRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return new Response(JSON.stringify(jsonRpcError(undefined, -32600, 'Invalid Request')), {
+      status: 400,
+      headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
+    });
+  }
+
+  const response = chatGpt
+    ? await handleChatGPTMcpRequest(parsed.data)
+    : await handleMcpRequest(parsed.data);
+  if (response === null) {
+    return new Response(null, { status: 202, headers: MCP_CORS_HEADERS });
+  }
+
+  return new Response(JSON.stringify(response), {
+    headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
+  });
+}
+
 // Cloudflare Worker export
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Serve favicon
-    if (url.pathname === "/favicon.ico") {
+    if (url.pathname === '/favicon.ico') {
       // WordPress-style "W" favicon as base64
-      const faviconBase64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAA7AAAAOwBeShxvQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAKPSURBVFiFtZe/axRBFMc/s3t7d3kTc4kJRpRYiIiNjYWNhYWFhY2FQkD8AxRsbCwsLCxsLGwsLCwsLCwsLCwsLCwUBEEQBEEQBEEQRBAiRo3Jmcvd7u6MxezO7d7tXS7qg2GZN+/H973vvZlZoUBEROYlWJRgXoKzwDRQKXJTGgYBNAQ8lOCGgG0iogqz4DtJsCLBvAT7iqTPCo4I0JGgKkExJR7PB7kpQVfAtd9lnyYjAVYFuCZg+n8wT8N+CVoClPtCQIT5lEwlLl6XNbqxNnVZY0LWeKiPMq9RLzKvFOCOBDsKid/VR3iv26RvJ/p1m3v6KLUirFOQSccdqsF1BYoJRIS5DNGEzLChQ8oqJCXiqjDGrjjyYb3HNQqSNQqSFfIyiJFE31bD+NJyOanHuF8LaBQkLgJ4AlbTzCM8K6zQVyF9FQIgoLTdQLo2nfCEbjhLJbiJjBgAdBRoJJmH9qJGQfJC7+NROkL0iXArJhD7aKsqHQklFWKpEICKbeKYfiZRRIJJMxpEKkrSlcAGKgLMJMlExOhLEq6AqQLi88rjlXkzfmQAbQWRfJdWHscMdGSErELGCohXBNC2TNysGODRNa22DRKYMkKgglGRPg9VBxEBvCjAGUdAxzJxlIuZJqKIBD0VENEHICoKD4DjJjAPBKxHNYKdQkcRtYzL7i1NCvyNOUQ5XgKcBLoiMCJ1BdZ9uJzXagtFEAMD9INP3I/o+RM8CPWvQAOY62e7RsEOEfmzP8BB4DxwFJg1x9uJtdOLN2AzZ7wtosOjDcO2rwEFGoAIiJI6LNYPZZw7oqBvAD6aG4wCBp9t4xdOBu6YRquJsQAAAABJRU5ErkJggg==";
-      const faviconBuffer = Uint8Array.from(atob(faviconBase64), c => c.charCodeAt(0));
-      
+      const faviconBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAA7AAAAOwBeShxvQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAKPSURBVFiFtZe/axRBFMc/s3t7d3kTc4kJRpRYiIiNjYWNhYWFhY2FQkD8AxRsbCwsLCxsLGwsLCwsLCwsLCwsLCwUBEEQBEEQBEEQRBAiRo3Jmcvd7u6MxezO7d7tXS7qg2GZN+/H973vvZlZoUBEROYlWJRgXoKzwDRQKXJTGgYBNAQ8lOCGgG0iogqz4DtJsCLBvAT7iqTPCo4I0JGgKkExJR7PB7kpQVfAtd9lnyYjAVYFuCZg+n8wT8N+CVoClPtCQIT5lEwlLl6XNbqxNnVZY0LWeKiPMq9RLzKvFOCOBDsKid/VR3iv26RvJ/p1m3v6KLUirFOQSccdqsF1BYoJRIS5DNGEzLChQ8oqJCXiqjDGrjjyYb3HNQqSNQqSFfIyiJFE31bD+NJyOanHuF8LaBQkLgJ4AlbTzCM8K6zQVyF9FQIgoLTdQLo2nfCEbjhLJbiJjBgAdBRoJJmH9qJGQfJC7+NROkL0iXArJhD7aKsqHQklFWKpEICKbeKYfiZRRIJJMxpEKkrSlcAGKgLMJMlExOhLEq6AqQLi88rjlXkzfmQAbQWRfJdWHscMdGSErELGCohXBNC2TNysGODRNa22DRKYMkKgglGRPg9VBxEBvCjAGUdAxzJxlIuZJqKIBD0VENEHICoKD4DjJjAPBKxHNYKdQkcRtYzL7i1NCvyNOUQ5XgKcBLoiMCJ1BdZ9uJzXagtFEAMD9INP3I/o+RM8CPWvQAOY62e7RsEOEfmzP8BB4DxwFJg1x9uJtdOLN2AzZ7wtosOjDcO2rwEFGoAIiJI6LNYPZZw7oqBvAD6aG4wCBp9t4xdOBu6YRquJsQAAAABJRU5ErkJggg==';
+      const faviconBuffer = Uint8Array.from(atob(faviconBase64), (c) => c.charCodeAt(0));
+
       return new Response(faviconBuffer, {
         headers: {
-          "Content-Type": "image/x-icon",
-          "Cache-Control": "public, max-age=31536000"
-        }
+          'Content-Type': 'image/x-icon',
+          'Cache-Control': 'public, max-age=31536000',
+        },
       });
     }
-    
+
     // Generate OG image
-    if (url.pathname === "/og-image.png") {
-      const title = (url.searchParams.get("title") || "WordPress Trac MCP Server")
+    if (url.pathname === '/og-image.png') {
+      const title = (url.searchParams.get('title') || 'WordPress Trac MCP Server')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-      const subtitle = (url.searchParams.get("subtitle") || "Model Context Protocol server for WordPress.org Trac integration")
+      const subtitle = (
+        url.searchParams.get('subtitle') ||
+        'Model Context Protocol server for WordPress.org Trac integration'
+      )
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-      
+
       // Create a WordPress-branded OG image
       const svg = `
         <svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
@@ -1416,76 +1360,44 @@ export default {
           <text x="60" y="560" class="subtitle">${subtitle}</text>
         </svg>
       `;
-      
+
       return new Response(svg, {
         headers: {
-          "Content-Type": "image/svg+xml",
-          "Cache-Control": "public, max-age=31536000"
-        }
+          'Content-Type': 'image/svg+xml',
+          'Cache-Control': 'public, max-age=31536000',
+        },
       });
     }
 
     // Serve landing page at root
-    if (url.pathname === "/") {
+    if (url.pathname === '/') {
       const versionInfo = env.CF_VERSION_METADATA;
       return new Response(getLandingPage(url, versionInfo), {
-        headers: { "Content-Type": "text/html" }
+        headers: { 'Content-Type': 'text/html' },
       });
     }
 
     // Health check
-    if (url.pathname === "/health") {
-      return new Response("OK", { status: 200 });
+    if (url.pathname === '/health') {
+      return new Response('OK', { status: 200 });
     }
 
     // Handle MCP endpoints
-    if (url.pathname === "/mcp" || url.pathname === "/mcp/chatgpt") {
-      if (request.method !== "POST") {
-        return new Response("Method not allowed", { status: 405 });
-      }
-
-      try {
-        const body = await request.json();
-        const mcpRequest = JsonRpcRequestSchema.parse(body);
-        
-        // Route to appropriate handler based on endpoint
-        const response = url.pathname === "/mcp/chatgpt" 
-          ? await handleChatGPTMcpRequest(mcpRequest)
-          : await handleMcpRequest(mcpRequest);
-        
-        return new Response(JSON.stringify(response), {
-          headers: { 
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-          }
-        });
-      } catch (error) {
-        return new Response(JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32700,
-            message: "Parse error",
-          },
-        }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
+    if (url.pathname === '/mcp' || url.pathname === '/mcp/chatgpt') {
+      return handleMcpHttpRequest(request, url.pathname === '/mcp/chatgpt');
     }
 
     // Handle CORS preflight
-    if (request.method === "OPTIONS") {
+    if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        }
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        },
       });
     }
 
-    return new Response("Not found", { status: 404 });
+    return new Response('Not found', { status: 404 });
   },
 };
