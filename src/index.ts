@@ -983,12 +983,23 @@ async function getTimelineForChatGPT(days: number, limit: number) {
 async function runChatGptSearch(query: string) {
   const trimmed = query.trim();
   if (/^#?\d+$/.test(trimmed)) {
-    const ticket = await getTicketForChatGPT(Number.parseInt(trimmed.replace('#', ''), 10), false);
-    return { results: [ticket], query, totalFound: 1 };
+    try {
+      const ticket = await getTicketForChatGPT(
+        Number.parseInt(trimmed.replace('#', ''), 10),
+        false
+      );
+      return { results: [ticket], query, totalFound: 1 };
+    } catch {
+      return { results: [], query, totalFound: 0 };
+    }
   }
   if (/^r\d+$/i.test(trimmed)) {
-    const changeset = await getChangesetForChatGPT(Number.parseInt(trimmed.slice(1), 10), false);
-    return { results: [changeset], query, totalFound: 1 };
+    try {
+      const changeset = await getChangesetForChatGPT(Number.parseInt(trimmed.slice(1), 10), false);
+      return { results: [changeset], query, totalFound: 1 };
+    } catch {
+      return { results: [], query, totalFound: 0 };
+    }
   }
   if (/\b(recent|timeline|latest|activity)\b/i.test(trimmed)) {
     const timeline = await getTimelineForChatGPT(7, 20);

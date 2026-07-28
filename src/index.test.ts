@@ -172,4 +172,31 @@ describe('MCP transport', () => {
     expect(body.error.code).toBe(-32602);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it.each(['99999999', 'r99999999'])(
+    'returns no search matches when direct lookup %s does not exist',
+    async (query) => {
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('', { status: 404, statusText: 'Not Found' }))
+      );
+
+      const response = await mcpRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'search', arguments: { query } },
+        },
+        '/mcp/chatgpt'
+      );
+      const body = (await response.json()) as RpcBody;
+      const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+      expect(body.result.isError).toBeUndefined();
+      expect(result).toEqual({ results: [], query, totalFound: 0 });
+    }
+  );
 });
