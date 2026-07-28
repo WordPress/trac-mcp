@@ -312,7 +312,7 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
   );
   const date = cleanTracText(
     html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? ''
-  );
+  ).split('\n')[0]?.trim() ?? '';
   const filesSection = html.match(/<dd class="files"[^>]*>([\s\S]*?)<\/ul>\s*<\/dd>/i)?.[1] ?? '';
   const files = Array.from(
     filesSection.matchAll(/<a[^>]*href="\/browser\/[^"]*"[^>]*>([\s\S]*?)<\/a>/gi),
