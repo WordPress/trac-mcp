@@ -54,7 +54,8 @@ Retrieve comprehensive information about specific tickets.
   "tool": "getTicket",
   "args": {
     "id": 59166,
-    "includeComments": true
+    "includeComments": true,
+    "commentLimit": 10
   }
 }
 ```
@@ -87,7 +88,7 @@ Monitor recent WordPress development activity.
 ```
 
 #### getTracInfo
-Get organizational data like components and milestones.
+Get components, milestones, priorities, severities, ticket types, or statuses.
 
 ```json
 {
