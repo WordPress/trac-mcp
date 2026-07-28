@@ -48,7 +48,8 @@ empty result set rather than an error. Omit `status` to search every ticket.
 
 Use `&` to combine filter expressions, or pass `status`, `component`,
 `milestone`, and `resolution` as separate arguments. Results include
-`totalFound`, `returned`, `page`, `pageSize`, and `hasMore`.
+`totalFound`, `returned`, `page`, `pageSize`, and `hasMore`. A separate
+argument overrides the same field in `query`.
 
 ```json
 {

@@ -241,6 +241,7 @@ async function searchTracTickets(
 
   const totalUrl = new URL(queryUrl);
   totalUrl.searchParams.delete('format');
+  totalUrl.searchParams.delete('page');
   const [records, totalResponse] = await Promise.all([
     fetchCsvRecords(queryUrl),
     fetch(totalUrl.toString(), { headers: { 'User-Agent': TRAC_USER_AGENT } }),
