@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker, {
   addTicketSearchQuery,
   cleanTracText,
+  fetchTrac,
   parseCsvRecords,
   parseTicketFilter,
   searchTracTickets,
@@ -60,7 +61,7 @@ describe('ticket search pagination', () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(''))
-      .mockResolvedValueOnce(new Response('Internal Server Error', { status: 500 }));
+      .mockResolvedValueOnce(new Response('Bad Request', { status: 400 }));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(searchTracTickets('', 10, 85)).resolves.toEqual({
@@ -71,6 +72,65 @@ describe('ticket search pagination', () => {
       pageSize: 10,
       hasMore: false,
     });
+  });
+});
+
+describe('Trac retries', () => {
+  it('retries transport failures, rate limits, server failures, and bot challenges', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError('network reset'))
+      .mockResolvedValueOnce(new Response('Rate limited', { status: 429 }))
+      .mockResolvedValueOnce(new Response('Unavailable', { status: 503 }))
+      .mockResolvedValueOnce(new Response('<html>Checking your browser</html>', { status: 403 }))
+      .mockResolvedValueOnce(new Response('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await fetchTrac(
+      'https://core.trac.wordpress.org/timeline',
+      undefined,
+      [0, 0, 0, 0]
+    );
+
+    expect(await response.text()).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([
+    [403, 'Forbidden'],
+    [404, 'Not Found'],
+  ])('does not retry a permanent HTTP %i response', async (status, statusText) => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(statusText, { status, statusText }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await fetchTrac('https://core.trac.wordpress.org/timeline', undefined, [0]);
+
+    expect(response.status).toBe(status);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('returns the final transient response after exhausting retries', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('Unavailable', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await fetchTrac('https://core.trac.wordpress.org/timeline', undefined, [0, 0]);
+
+    expect(response.status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('refuses requests outside the fixed Trac origin', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchTrac('https://example.com/timeline', undefined, [0])).rejects.toThrow(
+      'Refusing non-Trac request host'
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -137,7 +197,7 @@ describe('MCP transport', () => {
       'fetch',
       vi
         .fn<typeof fetch>()
-        .mockResolvedValue(new Response('Unavailable', { status: 503, statusText: 'Unavailable' }))
+        .mockResolvedValue(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }))
     );
 
     const response = await mcpRequest({
@@ -152,7 +212,7 @@ describe('MCP transport', () => {
     const body = (await response.json()) as RpcBody;
 
     expect(body.result.isError).toBe(true);
-    expect(body.result.content.at(0)?.text).toContain('Unavailable');
+    expect(body.result.content.at(0)?.text).toContain('Forbidden');
   });
 
   it('requests timeline activity ending today across ticket and repository events', async () => {
