@@ -31,6 +31,7 @@ function mcpRequest(body: unknown, path = '/mcp') {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('Trac parsing', () => {
@@ -152,6 +153,36 @@ describe('MCP transport', () => {
 
     expect(body.result.isError).toBe(true);
     expect(body.result.content.at(0)?.text).toContain('Unavailable');
+  });
+
+  it('requests timeline activity ending today across ticket and repository events', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('<?xml version="1.0"?><rss><channel></channel></rss>'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTimeline',
+        arguments: { days: 7, limit: 20 },
+      },
+    });
+
+    const timelineUrl = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(Object.fromEntries(timelineUrl.searchParams)).toEqual({
+      from: '2026-08-05',
+      daysback: '7',
+      max: '20',
+      format: 'rss',
+      ticket: 'on',
+      ticket_details: 'on',
+      'repo-': 'on',
+    });
   });
 
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {
