@@ -185,6 +185,78 @@ describe('MCP transport', () => {
     });
   });
 
+  it('includes linked pull request status, checks, reviews, and changes with a ticket', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+        )
+      )
+      .mockResolvedValueOnce(
+        Response.json([
+          {
+            number: 12833,
+            repo: 'WordPress/wordpress-develop',
+            state: 'closed',
+            title: 'REST API: Always register the media creation arguments',
+            user: {
+              name: 'contributor',
+              url: 'https://github.com/contributor',
+            },
+            created_at: '2026-08-04T07:18:35Z',
+            updated_at: '2026-08-05T06:41:21Z',
+            closed_at: '2026-08-05T06:41:21Z',
+            changes: {
+              additions: 234,
+              deletions: 45,
+              patch_url: 'https://github.com/WordPress/wordpress-develop/pull/12833.diff',
+              html_url: 'https://github.com/WordPress/wordpress-develop/pull/12833',
+            },
+            touches_tests: true,
+            check_runs: { 'GitHub Actions': 'success' },
+            reviews: { APPROVED: ['reviewer'] },
+            mergeable_state: 'blocked',
+            body: 'Pull request description',
+            html_url: 'https://github.com/WordPress/wordpress-develop/pull/12833',
+          },
+        ])
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTicket',
+        arguments: { id: 65808, includeComments: true, commentLimit: 10 },
+      },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(fetchMock.mock.calls[2]?.[0]?.toString()).toBe(
+      'https://api.wordpress.org/dotorg/trac/pr/?trac=core&ticket=65808'
+    );
+    expect(result.metadata.linkedPullRequests).toEqual([
+      expect.objectContaining({
+        number: 12833,
+        repository: 'WordPress/wordpress-develop',
+        checkRuns: { 'GitHub Actions': 'success' },
+        reviews: { APPROVED: ['reviewer'] },
+        touchesTests: true,
+        additions: 234,
+        deletions: 45,
+      }),
+    ]);
+    expect(result.text).toContain('Linked pull requests:');
+    expect(result.text).toContain('CI: GitHub Actions: success');
+    expect(result.text).toContain('Reviews: APPROVED: reviewer');
+    expect(result.text).toContain('Pull request description');
+  });
+
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);

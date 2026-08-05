@@ -23,7 +23,8 @@ dry-run build. Follow `docs/testing.md` when a change affects live Trac parsing 
 - Keep advertised JSON schemas and Zod runtime schemas aligned.
 - Add or update tests for parser, protocol, routing, and pagination behavior.
 - Treat Trac responses as untrusted input.
-- Keep upstream requests on `core.trac.wordpress.org`.
+- Keep upstream requests on `core.trac.wordpress.org` and the official linked-PR endpoint at
+  `api.wordpress.org/dotorg/trac/pr/`.
 - Return upstream failures as MCP tool errors.
 - Update README and manual checks when behavior changes.
 - Do not deploy without explicit maintainer approval.
