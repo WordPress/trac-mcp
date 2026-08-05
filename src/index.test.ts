@@ -297,6 +297,60 @@ describe('MCP transport', () => {
     expect(result.text).toContain('Linked pull requests: unavailable');
   });
 
+  it('separates attachments and changesets before limiting real comments', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>Ticket description</description>
+      <item><dc:creator>contributor</dc:creator><pubDate>Mon, 03 Aug 2026 10:42:01 GMT</pubDate><title>attachment set</title><link>https://core.trac.wordpress.org/ticket/65793</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;attachment&lt;/strong&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;01 example.png&lt;/span&gt;&lt;/li&gt;&lt;/ul&gt;</description></item>
+      <item><dc:creator>committer</dc:creator><pubDate>Thu, 07 Nov 2024 16:03:41 GMT</pubDate><title>status changed; resolution set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; closed&lt;/li&gt;&lt;li&gt;&lt;strong&gt;resolution&lt;/strong&gt; fixed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;In &lt;a class=&quot;changeset&quot; href=&quot;https://core.trac.wordpress.org/changeset/59369&quot;&gt;59369&lt;/a&gt;:&lt;/p&gt;&lt;div class=&quot;message&quot;&gt;&lt;p&gt;Backport message.&lt;/p&gt;&lt;/div&gt;</description></item>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:5</link><description>&lt;p&gt;Useful review comment.&lt;/p&gt;</description></item>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title>keywords set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:6</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; needs-testing added&lt;/li&gt;&lt;/ul&gt;</description></item>
+      <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:02:00 GMT</pubDate><title>description changed</title><link>https://core.trac.wordpress.org/ticket/65793#description</link><description>&lt;p&gt;Ticket description repeated.&lt;/p&gt;</description></item>
+      <item><dc:creator>slackbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:03:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:7</link><description>&lt;p&gt;Slack mention.&lt;/p&gt;</description></item>
+      <item><dc:creator>prbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:04:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:8</link><description>&lt;p&gt;Pull request relay.&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary,status\n65793,Accessibility ticket,new'))
+      .mockResolvedValueOnce(new Response(rss));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTicket',
+        arguments: { id: 65793, includeComments: true, commentLimit: 1 },
+      },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.attachments).toEqual([
+      expect.objectContaining({
+        filename: '01 example.png',
+        url: 'https://core.trac.wordpress.org/raw-attachment/ticket/65793/01%20example.png',
+      }),
+    ]);
+    expect(result.metadata.changesets).toEqual([
+      expect.objectContaining({
+        revision: 59369,
+        message: 'Backport message.',
+        url: 'https://core.trac.wordpress.org/changeset/59369',
+      }),
+    ]);
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({ id: 5, author: 'reviewer', comment: 'Useful review comment.' }),
+    ]);
+    expect(result.metadata.totalComments).toBe(1);
+    expect(result.text).toContain('Attachments:');
+    expect(result.text).toContain('Changesets:');
+    expect(result.text).toContain('Recent comments:');
+    expect(result.text).not.toContain('Slack mention.');
+    expect(result.text).not.toContain('Pull request relay.');
+    expect(result.text).not.toContain('Ticket description repeated.');
+  });
+
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);

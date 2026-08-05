@@ -28,6 +28,8 @@ Start the Worker with `pnpm dev`, then use harmless public ticket and changeset 
    - Search a keyword and a structured filter.
    - Read ticket `65739` with and without comments.
    - Read ticket `65808` and confirm its linked pull request data is present.
+   - Read ticket `65793` and confirm attachments are separate from comments.
+   - Read ticket `62358` and confirm changesets are separate from comments.
    - Read changeset `58504` with and without its diff.
    - Read one day of timeline activity.
    - List components and milestones.

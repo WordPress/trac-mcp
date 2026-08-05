@@ -17,7 +17,7 @@ The standard `/mcp` endpoint provides:
 | Tool | Purpose |
 | --- | --- |
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
-| `getTicket` | Read a ticket, its metadata, recent comments, and linked pull requests |
+| `getTicket` | Read a ticket, its attachments, changesets, recent human discussion, and linked pull requests |
 | `getChangeset` | Read a changeset and an optional truncated diff |
 | `getTimeline` | Read recent Trac activity |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
