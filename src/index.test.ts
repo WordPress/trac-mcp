@@ -251,10 +251,50 @@ describe('MCP transport', () => {
         deletions: 45,
       }),
     ]);
+    expect(result.metadata.linkedPullRequestsUnavailable).toBe(false);
     expect(result.text).toContain('Linked pull requests:');
     expect(result.text).toContain('CI: GitHub Actions: success');
     expect(result.text).toContain('Reviews: APPROVED: reviewer');
     expect(result.text).toContain('Pull request description');
+  });
+
+  it.each([
+    [
+      'an HTTP error',
+      () => new Response('Unavailable', { status: 503, statusText: 'Unavailable' }),
+    ],
+    ['an unexpected response shape', () => Response.json([{ unexpected: 'shape' }])],
+  ])('keeps the ticket available when linked pull requests return %s', async (_label, response) => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+          )
+        )
+        .mockResolvedValueOnce(response())
+    );
+
+    const responseFromWorker = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTicket',
+        arguments: { id: 65808, includeComments: true, commentLimit: 10 },
+      },
+    });
+    const body = (await responseFromWorker.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).not.toBe(true);
+    expect(result.title).toBe('#65808: REST API ticket');
+    expect(result.metadata.linkedPullRequests).toEqual([]);
+    expect(result.metadata.linkedPullRequestsUnavailable).toBe(true);
+    expect(result.text).toContain('Linked pull requests: unavailable');
   });
 
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {

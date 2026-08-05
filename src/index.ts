@@ -422,10 +422,12 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   addColumns(queryUrl, TICKET_COLUMNS);
 
   const rssUrl = `https://core.trac.wordpress.org/ticket/${ticketId}?format=rss`;
-  const [records, rssResponse, linkedPullRequests] = await Promise.all([
+  const [records, rssResponse, linkedPullRequestsResult] = await Promise.all([
     fetchCsvRecords(queryUrl),
     fetch(rssUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
-    fetchLinkedPullRequests(ticketId),
+    fetchLinkedPullRequests(ticketId)
+      .then((linkedPullRequests) => ({ linkedPullRequests, unavailable: false }))
+      .catch(() => ({ linkedPullRequests: [], unavailable: true })),
   ]);
 
   const record = records.find((candidate) => Number.parseInt(candidate.id ?? '', 10) === ticketId);
@@ -451,7 +453,13 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   const comments = includeComments && limit > 0 ? allHistory.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
 
-  return { ticket, comments, totalComments: allHistory.length, linkedPullRequests };
+  return {
+    ticket,
+    comments,
+    totalComments: allHistory.length,
+    linkedPullRequests: linkedPullRequestsResult.linkedPullRequests,
+    linkedPullRequestsUnavailable: linkedPullRequestsResult.unavailable,
+  };
 }
 
 function formatTicketResult(
@@ -459,7 +467,8 @@ function formatTicketResult(
   includeComments: boolean,
   stringId = false
 ) {
-  const { ticket, comments, totalComments, linkedPullRequests } = ticketData;
+  const { ticket, comments, totalComments, linkedPullRequests, linkedPullRequestsUnavailable } =
+    ticketData;
   const historyText =
     includeComments && comments.length > 0
       ? `\n\nRecent history:\n${comments
@@ -471,16 +480,18 @@ function formatTicketResult(
           })
           .join('\n\n')}`
       : '';
-  const linkedPullRequestsText = linkedPullRequests.length
-    ? `\n\nLinked pull requests:\n${linkedPullRequests
-        .map((pullRequest) => {
-          const checks = Object.entries(pullRequest.checkRuns)
-            .map(([name, status]) => `${name}: ${status}`)
-            .join(', ');
-          const reviews = Object.entries(pullRequest.reviews)
-            .map(([verdict, reviewers]) => `${verdict}: ${reviewers.join(', ')}`)
-            .join('; ');
-          return `${pullRequest.repository}#${pullRequest.number}: ${pullRequest.title}
+  const linkedPullRequestsText = linkedPullRequestsUnavailable
+    ? '\n\nLinked pull requests: unavailable'
+    : linkedPullRequests.length
+      ? `\n\nLinked pull requests:\n${linkedPullRequests
+          .map((pullRequest) => {
+            const checks = Object.entries(pullRequest.checkRuns)
+              .map(([name, status]) => `${name}: ${status}`)
+              .join(', ');
+            const reviews = Object.entries(pullRequest.reviews)
+              .map(([verdict, reviewers]) => `${verdict}: ${reviewers.join(', ')}`)
+              .join('; ');
+            return `${pullRequest.repository}#${pullRequest.number}: ${pullRequest.title}
 State: ${pullRequest.state}
 Author: ${pullRequest.author}
 CI: ${checks || 'No check results'}
@@ -490,9 +501,9 @@ Changes: +${pullRequest.additions}/-${pullRequest.deletions}
 URL: ${pullRequest.url}
 
 ${pullRequest.body || 'No pull request description'}`;
-        })
-        .join('\n\n')}`
-    : '';
+          })
+          .join('\n\n')}`
+      : '';
 
   return {
     id: stringId ? ticket.id.toString() : ticket.id,
@@ -521,6 +532,7 @@ ${ticket.description}${linkedPullRequestsText}${historyText}`,
       totalComments,
       returnedComments: comments.length,
       linkedPullRequests,
+      linkedPullRequestsUnavailable,
     },
   };
 }
