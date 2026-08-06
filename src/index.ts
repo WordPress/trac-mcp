@@ -131,6 +131,23 @@ type LinkedPullRequest = {
   body: string;
 };
 
+type TicketAttachment = {
+  filename: string;
+  author: string;
+  timestamp: string;
+  description: string;
+  url: string;
+};
+
+type TicketChangeset = {
+  revision: number;
+  author: string;
+  timestamp: string;
+  changes: string;
+  message: string;
+  url: string;
+};
+
 const HTML_ENTITIES: Record<string, string> = {
   amp: '&',
   apos: "'",
@@ -197,10 +214,172 @@ function parseRssItems(rssText: string) {
       title: cleanTracText(extractXmlElement(item, 'title')),
       link: cleanTracText(extractXmlElement(item, 'link')),
       description: cleanTracText(extractXmlElement(item, 'description')),
+      rawDescription: extractXmlElement(item, 'description'),
       date: cleanTracText(extractXmlElement(item, 'pubDate')),
       author: cleanTracText(extractXmlElement(item, 'dc:creator')),
     };
   });
+}
+
+const TICKET_FIELDS = new Set([
+  'attachment',
+  'cc',
+  'component',
+  'description',
+  'focuses',
+  'keywords',
+  'milestone',
+  'owner',
+  'priority',
+  'reporter',
+  'resolution',
+  'severity',
+  'status',
+  'summary',
+  'type',
+  'version',
+]);
+
+function splitTicketHistoryDescription(rawDescription: string) {
+  const html = decodeHtmlEntities(rawDescription);
+  const list = html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i);
+  if (!list?.[0] || !list[1]) {
+    return { html, body: cleanTracText(html) };
+  }
+
+  const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi), (match) =>
+    match[0]
+      .match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>/i)?.[1]
+      ?.trim()
+      .toLowerCase()
+  );
+  const unmatched = list[1].replace(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi, '').trim();
+  if (
+    unmatched ||
+    items.length === 0 ||
+    items.some((field) => !field || !TICKET_FIELDS.has(field))
+  ) {
+    return { html, body: cleanTracText(html) };
+  }
+
+  const narrativeHtml = html.slice(list[0].length);
+  return { html, body: cleanTracText(narrativeHtml), narrativeHtml };
+}
+
+function filterTicketFieldChurn(changes: string): string {
+  return changes
+    .split(';')
+    .map((clause) => {
+      const match = clause.trim().match(/^(.+?)\s+(set|changed|deleted)$/i);
+      if (!match?.[1] || !match[2]) {
+        return clause.trim();
+      }
+      const fields = match[1]
+        .split(',')
+        .map((field) => field.trim())
+        .filter((field) => !['cc', 'keywords'].includes(field.toLowerCase()));
+      return fields.length ? `${fields.join(', ')} ${match[2]}` : '';
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
+function attachmentFilename(html: string): string {
+  const emphasized = html.match(/<em(?:\s[^>]*)?>([\s\S]*?)<\/em>/i)?.[1];
+  const fieldValue = html.match(
+    /<strong(?:\s[^>]*)?>\s*attachment\s*<\/strong>[\s\S]*?<span\s+class=["']trac-field-new["'][^>]*>([\s\S]*?)<\/span>/i
+  )?.[1];
+  return cleanTracText(emphasized ?? fieldValue ?? '');
+}
+
+type RssItem = ReturnType<typeof parseRssItems>[number];
+type ClassifiedTicketHistory =
+  | { kind: 'attachment'; entry: TicketAttachment }
+  | { kind: 'changeset'; entry: TicketChangeset }
+  | { kind: 'comment'; entry: TicketHistoryEntry };
+
+function classifyTicketHistoryItem(
+  ticketId: number,
+  item: RssItem
+): ClassifiedTicketHistory | null {
+  if (
+    ['prbot', 'slackbot'].includes(item.author.toLowerCase()) ||
+    /#description$/.test(item.link)
+  ) {
+    return null;
+  }
+
+  const parsedDescription = splitTicketHistoryDescription(item.rawDescription);
+  if (item.title.toLowerCase() === 'attachment set') {
+    const filename = attachmentFilename(parsedDescription.html);
+    return {
+      kind: 'attachment',
+      entry: {
+        filename,
+        author: item.author,
+        timestamp: item.date,
+        description: parsedDescription.body,
+        url: filename
+          ? `https://core.trac.wordpress.org/raw-attachment/ticket/${ticketId}/${encodeURIComponent(filename)}`
+          : '',
+      },
+    };
+  }
+
+  const narrativeHtml = parsedDescription.narrativeHtml ?? parsedDescription.html;
+  const changesetMatch = narrativeHtml.match(
+    /^\s*<p>\s*In\s*<a\b(?=[^>]*\bclass=["'][^"']*\bchangeset\b[^"']*["'])[^>]*>\[?(\d+)\]?<\/a>\s*:?\s*<\/p>\s*/i
+  );
+  if (changesetMatch?.[1]) {
+    const revision = Number.parseInt(changesetMatch[1], 10);
+    return {
+      kind: 'changeset',
+      entry: {
+        revision,
+        author: item.author,
+        timestamp: item.date,
+        changes: filterTicketFieldChurn(item.title),
+        message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length)),
+        url: `https://core.trac.wordpress.org/changeset/${revision}`,
+      },
+    };
+  }
+
+  const changes = filterTicketFieldChurn(item.title);
+  if (!changes && !parsedDescription.body) {
+    return null;
+  }
+  const commentId = item.link.match(/#comment:(\d+)/)?.[1];
+  return {
+    kind: 'comment',
+    entry: {
+      id: commentId ? Number.parseInt(commentId, 10) : null,
+      author: item.author,
+      timestamp: item.date,
+      changes,
+      comment: parsedDescription.body,
+      url: item.link,
+    },
+  };
+}
+
+function classifyTicketHistory(ticketId: number, rssText: string) {
+  const comments: TicketHistoryEntry[] = [];
+  const attachments: TicketAttachment[] = [];
+  const changesets: TicketChangeset[] = [];
+
+  for (const item of parseRssItems(rssText)) {
+    const classified = classifyTicketHistoryItem(ticketId, item);
+    if (classified?.kind === 'comment') {
+      comments.push(classified.entry);
+    } else if (classified?.kind === 'attachment') {
+      attachments.push(classified.entry);
+    } else if (classified?.kind === 'changeset') {
+      changesets.push(classified.entry);
+    }
+  }
+
+  return { comments, attachments, changesets };
 }
 
 export function parseCsvRecords(csvData: string): TracRecord[] {
@@ -438,27 +617,19 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   const rssText = await rssResponse.text();
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
   const description = cleanTracText(extractXmlElement(channel, 'description'));
-  const allHistory: TicketHistoryEntry[] = parseRssItems(rssText).map((item) => {
-    const commentId = item.link.match(/#comment:(\d+)/)?.[1];
-    return {
-      id: commentId ? Number.parseInt(commentId, 10) : null,
-      author: item.author,
-      timestamp: item.date,
-      changes: item.title,
-      comment: item.description,
-      url: item.link,
-    };
-  });
+  const history = classifyTicketHistory(ticketId, rssText);
   const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
-  const comments = includeComments && limit > 0 ? allHistory.slice(-limit) : [];
+  const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
 
   return {
     ticket,
     comments,
-    totalComments: allHistory.length,
+    totalComments: history.comments.length,
     linkedPullRequests: linkedPullRequestsResult.linkedPullRequests,
     linkedPullRequestsUnavailable: linkedPullRequestsResult.unavailable,
+    attachments: history.attachments,
+    changesets: history.changesets,
   };
 }
 
@@ -467,11 +638,18 @@ function formatTicketResult(
   includeComments: boolean,
   stringId = false
 ) {
-  const { ticket, comments, totalComments, linkedPullRequests, linkedPullRequestsUnavailable } =
-    ticketData;
+  const {
+    ticket,
+    comments,
+    totalComments,
+    linkedPullRequests,
+    linkedPullRequestsUnavailable,
+    attachments,
+    changesets,
+  } = ticketData;
   const historyText =
     includeComments && comments.length > 0
-      ? `\n\nRecent history:\n${comments
+      ? `\n\nRecent comments:\n${comments
           .map((entry) => {
             const heading = [entry.timestamp, entry.author, entry.changes]
               .filter(Boolean)
@@ -504,6 +682,23 @@ ${pullRequest.body || 'No pull request description'}`;
           })
           .join('\n\n')}`
       : '';
+  const attachmentsText = attachments.length
+    ? `\n\nAttachments:\n${attachments
+        .map((attachment) => {
+          const details = [attachment.author, attachment.timestamp].filter(Boolean).join(' — ');
+          const descriptionText = attachment.description ? `\n${attachment.description}` : '';
+          return `- ${attachment.filename || '(unnamed)'}${details ? ` — ${details}` : ''}${attachment.url ? `\n  ${attachment.url}` : ''}${descriptionText}`;
+        })
+        .join('\n')}`
+    : '';
+  const changesetsText = changesets.length
+    ? `\n\nChangesets:\n${changesets
+        .map((changeset) => {
+          const details = [changeset.author, changeset.timestamp].filter(Boolean).join(' — ');
+          return `- r${changeset.revision}${details ? ` — ${details}` : ''}\n  ${changeset.url}${changeset.message ? `\n${changeset.message}` : ''}`;
+        })
+        .join('\n\n')}`
+    : '';
 
   return {
     id: stringId ? ticket.id.toString() : ticket.id,
@@ -524,7 +719,7 @@ Keywords: ${ticket.keywords}
 Focuses: ${ticket.focuses}
 
 Description:
-${ticket.description}${linkedPullRequestsText}${historyText}`,
+${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}`,
     url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
     metadata: {
       ticket,
@@ -533,6 +728,8 @@ ${ticket.description}${linkedPullRequestsText}${historyText}`,
       returnedComments: comments.length,
       linkedPullRequests,
       linkedPullRequestsUnavailable,
+      attachments,
+      changesets,
     },
   };
 }
