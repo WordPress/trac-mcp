@@ -4,11 +4,23 @@ A read-only [Model Context Protocol](https://modelcontextprotocol.io/) server fo
 [WordPress Core Trac](https://core.trac.wordpress.org/). It runs as a Cloudflare Worker and uses
 Trac's public HTML, CSV, RSS, and diff endpoints.
 
-Live server:
+Live servers:
+
+Production:
 
 - Standard MCP: `https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp`
 - Search/fetch compatibility: `https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp/chatgpt`
 - Health check: `https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/health`
+
+Staging:
+
+- Standard MCP: `https://mcp-server-wporg-trac-staging.a8c-aiops.workers.dev/mcp`
+- Search/fetch compatibility: `https://mcp-server-wporg-trac-staging.a8c-aiops.workers.dev/mcp/chatgpt`
+- Health check: `https://mcp-server-wporg-trac-staging.a8c-aiops.workers.dev/health`
+
+The former staging deployment at `https://mcp-server-wporg-trac-staging.a8cai.workers.dev` is
+deprecated and runs older code. Its `a8cai.workers.dev` subdomain differs from the active staging
+deployment's `a8c-aiops.workers.dev` subdomain.
 
 ## Tools
 
@@ -99,6 +111,9 @@ Deployment requires a configured Cloudflare account:
 pnpm run deploy
 pnpm run deploy:production
 ```
+
+`pnpm run deploy` targets the active staging Worker. `pnpm run deploy:production` targets the
+production Worker.
 
 ## Design and safety
 
