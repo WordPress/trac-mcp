@@ -38,7 +38,7 @@
     "@biomejs/biome": "^1.8.3",
     "@cloudflare/workers-types": "^5.20260801.1",
     "typescript": "^5.4.5",
-    "vitest": "^3.2.6",
+    "vitest": "^4.1.10",
     "wrangler": "^4.118.0"
   },
   "engines": {
