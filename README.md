@@ -34,9 +34,6 @@ The standard `/mcp` endpoint provides:
 | `getTimeline` | Read recent Trac activity |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
 
-The `/mcp/chatgpt` compatibility endpoint provides `search` and `fetch`. Use a bare number for a
-ticket and an `r` prefix for a changeset: `65739` and `r58504`.
-
 `getChangeset` expects the numeric `revision` argument, not `rev`:
 
 ```json
@@ -45,6 +42,9 @@ ticket and an `r` prefix for a changeset: `65739` and `r58504`.
   "includeDiff": false
 }
 ```
+
+The `/mcp/chatgpt` compatibility endpoint provides `search` and `fetch`. Use a bare number for a
+ticket and an `r` prefix for a changeset: `65739` and `r58504`.
 
 ### Search filters
 
@@ -108,12 +108,12 @@ This runs TypeScript, Biome, Vitest, and a Cloudflare Worker dry-run build. See
 Deployment requires a configured Cloudflare account:
 
 ```bash
+# Staging
 pnpm run deploy
+
+# Production
 pnpm run deploy:production
 ```
-
-`pnpm run deploy` targets the active staging Worker. `pnpm run deploy:production` targets the
-production Worker.
 
 ## Design and safety
 
