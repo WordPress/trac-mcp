@@ -546,9 +546,13 @@ async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
 
 async function fetchTimeline(days: number, limit: number) {
   const timelineUrl = new URL('https://core.trac.wordpress.org/timeline');
-  timelineUrl.searchParams.set('from', `${days} days ago`);
+  timelineUrl.searchParams.set('from', new Date().toISOString().slice(0, 10));
+  timelineUrl.searchParams.set('daysback', days.toString());
   timelineUrl.searchParams.set('max', limit.toString());
   timelineUrl.searchParams.set('format', 'rss');
+  timelineUrl.searchParams.set('ticket', 'on');
+  timelineUrl.searchParams.set('ticket_details', 'on');
+  timelineUrl.searchParams.set('repo-', 'on');
 
   const response = await fetch(timelineUrl.toString(), {
     headers: { 'User-Agent': TRAC_USER_AGENT },
