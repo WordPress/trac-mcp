@@ -6,9 +6,9 @@ Trac's public HTML, CSV, RSS, and diff endpoints.
 
 Live server:
 
-- Standard MCP: `https://mcp-server-wporg-trac-staging.a8cai.workers.dev/mcp`
-- Search/fetch compatibility: `https://mcp-server-wporg-trac-staging.a8cai.workers.dev/mcp/chatgpt`
-- Health check: `https://mcp-server-wporg-trac-staging.a8cai.workers.dev/health`
+- Standard MCP: `https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp`
+- Search/fetch compatibility: `https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp/chatgpt`
+- Health check: `https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/health`
 
 ## Tools
 
@@ -24,6 +24,15 @@ The standard `/mcp` endpoint provides:
 
 The `/mcp/chatgpt` compatibility endpoint provides `search` and `fetch`. Use a bare number for a
 ticket and an `r` prefix for a changeset: `65739` and `r58504`.
+
+`getChangeset` expects the numeric `revision` argument, not `rev`:
+
+```json
+{
+  "revision": 58504,
+  "includeDiff": false
+}
+```
 
 ### Search filters
 
@@ -52,7 +61,7 @@ bridge can use `mcp-remote`:
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp-server-wporg-trac-staging.a8cai.workers.dev/mcp"
+        "https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp"
       ]
     }
   }
@@ -62,6 +71,9 @@ bridge can use `mcp-remote`:
 For ChatGPT, add the compatibility endpoint as a custom app. See
 [OpenAI's current MCP help](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)
 because product labels and setup steps change.
+
+After changing a configured server URL, reconnect the MCP server or restart the client once. Future
+deployments to the same URL do not require a client configuration change.
 
 ## Develop
 
@@ -84,8 +96,8 @@ This runs TypeScript, Biome, Vitest, and a Cloudflare Worker dry-run build. See
 Deployment requires a configured Cloudflare account:
 
 ```bash
-pnpm deploy
-pnpm deploy:production
+pnpm run deploy
+pnpm run deploy:production
 ```
 
 ## Design and safety
