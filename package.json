@@ -35,11 +35,11 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.8.3",
-    "@cloudflare/workers-types": "^5.20260722.1",
-    "typescript": "^5.4.5",
-    "vitest": "^3.2.6",
-    "wrangler": "^4.115.0"
+    "@biomejs/biome": "^2.5.6",
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.118.0"
   },
   "engines": {
     "node": ">=22"
