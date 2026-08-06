@@ -6,7 +6,7 @@
 - `smoke-test.md` is that manual checklist as paste-ready commands with expected results.
 - `local-development.md` explains how to run the Worker locally and verify its browser-visible routes.
 
-The two are one document split by audience. `testing.md` explains the shape, `smoke-test.md` is what you actually run. Change one and check the other still agrees.
+`testing.md` and `smoke-test.md` are one document split by audience. `testing.md` explains the shape, `smoke-test.md` is what you actually run. Change one and check the other still agrees.
 
 ## Verify before you document
 

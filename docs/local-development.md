@@ -7,10 +7,10 @@ Use Wrangler to run the Worker on your computer. Local development does not requ
 - Node.js 22 or later.
 - pnpm 10.
 
-Install the locked dependencies:
+Install the dependencies:
 
 ```bash
-pnpm install --frozen-lockfile
+pnpm install
 ```
 
 ## Start the Worker
@@ -31,7 +31,7 @@ Keep that terminal open. Wrangler will build the Worker, watch the source files,
 
 Press `b` in the Wrangler terminal, or open [http://localhost:8787/](http://localhost:8787/) yourself. The root route is a browser-visible landing page that lists the MCP tools and shows local connection examples.
 
-After editing `src/index.ts`, wait for Wrangler to rebuild and refresh the page. The browser examples should continue to use `http://localhost:8787`; they do not change a deployed environment.
+After editing `src/index.ts`, wait for Wrangler to rebuild and refresh the page. The browser examples should continue to use the origin you started on; they do not change a deployed environment.
 
 Open [http://localhost:8787/health](http://localhost:8787/health) in another tab. It should show:
 
