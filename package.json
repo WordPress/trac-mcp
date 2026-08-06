@@ -36,13 +36,18 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.8.3",
-    "@cloudflare/workers-types": "^4.20240529.0",
+    "@cloudflare/workers-types": "^5.20260722.1",
     "typescript": "^5.4.5",
     "vitest": "^3.2.6",
-    "wrangler": "^4.59.1"
+    "wrangler": "^4.115.0"
   },
   "engines": {
     "node": ">=22"
+  },
+  "pnpm": {
+    "overrides": {
+      "undici": "7.29.0"
+    }
   },
   "packageManager": "pnpm@10.28.2",
   "repository": {
