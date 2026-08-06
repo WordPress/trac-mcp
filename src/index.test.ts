@@ -30,6 +30,64 @@ function mcpRequest(body: unknown, path = '/mcp') {
   );
 }
 
+function linkedPullRequestFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    number: 12833,
+    repo: 'WordPress/wordpress-develop',
+    state: 'closed',
+    title: 'REST API: Always register the media creation arguments',
+    user: {
+      name: 'contributor',
+      url: 'https://github.com/contributor',
+    },
+    created_at: '2026-08-04T07:18:35Z',
+    updated_at: '2026-08-05T06:41:21Z',
+    closed_at: '2026-08-05T06:41:21Z',
+    changes: {
+      additions: 234,
+      deletions: 45,
+      patch_url: 'https://github.com/WordPress/wordpress-develop/pull/12833.diff',
+      html_url: 'https://github.com/WordPress/wordpress-develop/pull/12833',
+    },
+    touches_tests: true,
+    check_runs: { 'GitHub Actions': 'success' },
+    reviews: { APPROVED: ['reviewer'] },
+    mergeable_state: 'blocked',
+    body: 'Pull request description',
+    html_url: 'https://github.com/WordPress/wordpress-develop/pull/12833',
+    ...overrides,
+  };
+}
+
+async function getTicketWithLinkedPullRequest(pullRequest = linkedPullRequestFixture()) {
+  const fetchMock = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+    .mockResolvedValueOnce(
+      new Response(
+        '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+      )
+    )
+    .mockResolvedValueOnce(Response.json([pullRequest]));
+  vi.stubGlobal('fetch', fetchMock);
+
+  const response = await mcpRequest({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'getTicket',
+      arguments: { id: 65808, includeComments: true, commentLimit: 10 },
+    },
+  });
+  const body = (await response.json()) as RpcBody;
+
+  return {
+    fetchMock,
+    result: JSON.parse(body.result.content.at(0)?.text ?? '{}'),
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -246,56 +304,7 @@ describe('MCP transport', () => {
   });
 
   it('includes linked pull request status, checks, reviews, and changes with a ticket', async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
-      .mockResolvedValueOnce(
-        new Response(
-          '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
-        )
-      )
-      .mockResolvedValueOnce(
-        Response.json([
-          {
-            number: 12833,
-            repo: 'WordPress/wordpress-develop',
-            state: 'closed',
-            title: 'REST API: Always register the media creation arguments',
-            user: {
-              name: 'contributor',
-              url: 'https://github.com/contributor',
-            },
-            created_at: '2026-08-04T07:18:35Z',
-            updated_at: '2026-08-05T06:41:21Z',
-            closed_at: '2026-08-05T06:41:21Z',
-            changes: {
-              additions: 234,
-              deletions: 45,
-              patch_url: 'https://github.com/WordPress/wordpress-develop/pull/12833.diff',
-              html_url: 'https://github.com/WordPress/wordpress-develop/pull/12833',
-            },
-            touches_tests: true,
-            check_runs: { 'GitHub Actions': 'success' },
-            reviews: { APPROVED: ['reviewer'] },
-            mergeable_state: 'blocked',
-            body: 'Pull request description',
-            html_url: 'https://github.com/WordPress/wordpress-develop/pull/12833',
-          },
-        ])
-      );
-    vi.stubGlobal('fetch', fetchMock);
-
-    const response = await mcpRequest({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: {
-        name: 'getTicket',
-        arguments: { id: 65808, includeComments: true, commentLimit: 10 },
-      },
-    });
-    const body = (await response.json()) as RpcBody;
-    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+    const { fetchMock, result } = await getTicketWithLinkedPullRequest();
 
     expect(fetchMock.mock.calls[2]?.[0]?.toString()).toBe(
       'https://api.wordpress.org/dotorg/trac/pr/?trac=core&ticket=65808'
@@ -319,11 +328,46 @@ describe('MCP transport', () => {
   });
 
   it.each([
+    {
+      label: 'check list',
+      overrides: { check_runs: [] },
+      expectedCheckRuns: {},
+      expectedReviews: { APPROVED: ['reviewer'] },
+      expectedText: 'CI: No check results',
+    },
+    {
+      label: 'review list',
+      overrides: { reviews: [] },
+      expectedCheckRuns: { 'GitHub Actions': 'success' },
+      expectedReviews: {},
+      expectedText: 'Reviews: No reviews',
+    },
+  ])(
+    'normalizes an empty linked pull request $label',
+    async ({ overrides, expectedCheckRuns, expectedReviews, expectedText }) => {
+      const { result } = await getTicketWithLinkedPullRequest(linkedPullRequestFixture(overrides));
+
+      expect(result.metadata.linkedPullRequests).toEqual([
+        expect.objectContaining({
+          checkRuns: expectedCheckRuns,
+          reviews: expectedReviews,
+        }),
+      ]);
+      expect(result.metadata.linkedPullRequestsUnavailable).toBe(false);
+      expect(result.text).toContain(expectedText);
+    }
+  );
+
+  it.each([
     [
       'an HTTP error',
       () => new Response('Unavailable', { status: 503, statusText: 'Unavailable' }),
     ],
     ['an unexpected response shape', () => Response.json([{ unexpected: 'shape' }])],
+    [
+      'a non-empty list for a record field',
+      () => Response.json([linkedPullRequestFixture({ reviews: ['unexpected'] })]),
+    ],
   ])('keeps the ticket available when linked pull requests return %s', async (_label, response) => {
     vi.stubGlobal(
       'fetch',

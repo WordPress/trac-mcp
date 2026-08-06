@@ -45,6 +45,11 @@ const ChatGptSearchArgsSchema = z.object({
 const ChatGptFetchArgsSchema = z.object({
   id: z.string().regex(/^(?:r\d+|\d+)$/, 'Use a ticket number or an r-prefixed changeset'),
 });
+
+function normalizeEmptyRecord(value: unknown) {
+  return Array.isArray(value) && value.length === 0 ? {} : value;
+}
+
 const LinkedPullRequestSchema = z.object({
   number: z.number().int().positive(),
   repo: z.string(),
@@ -64,8 +69,8 @@ const LinkedPullRequestSchema = z.object({
     html_url: z.string().url(),
   }),
   touches_tests: z.boolean(),
-  check_runs: z.record(z.string()),
-  reviews: z.record(z.array(z.string())),
+  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string())),
+  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.array(z.string()))),
   mergeable_state: z.string(),
   body: z.string().nullable(),
   html_url: z.string().url(),
