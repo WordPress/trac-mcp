@@ -14,6 +14,8 @@ pnpm dev
 pnpm check
 ```
 
+For a browser-visible local preview, keep `pnpm dev` running and open `http://localhost:8787/`. Check `http://localhost:8787/health` for `OK`. See `docs/local-development.md` for the full workflow and troubleshooting.
+
 `pnpm check` is the required pre-PR gate. It runs TypeScript, Biome, Vitest, and a Cloudflare Worker dry-run build for both environments. CI runs the same command, so run it locally first rather than using CI as the first check.
 
 Green CI does not mean the feature works: every automated test mocks Trac. Follow `docs/testing.md` when a change affects live Trac parsing or MCP transport, and see `tests/AGENTS.md` for how the automated and manual layers divide the work.
