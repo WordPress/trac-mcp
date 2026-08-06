@@ -23,12 +23,17 @@ Tool results arrive as JSON encoded inside a text block, so raw `grep` on the re
 escaping. Paste these two helpers first:
 
 ```bash
-rpc() { curl -s -m 30 -X POST "$BASE$1" -H 'Content-Type: application/json' \
+rpc() { curl -s -m 60 -X POST "$BASE$1" -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' -d "$2"; }
 
 call() { rpc "$1" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}" \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['content'][0]['text'] if 'error' not in d else 'ERROR '+json.dumps(d['error']))"; }
 ```
+
+The 60 second timeout is deliberate. The server retries transient Trac failures with 2, 4, and 8
+second backoff, and `getChangeset` fetches the changeset page and its diff in sequence, so a request
+that eventually succeeds can spend about 28 seconds waiting before any network time. A shorter
+timeout kills valid retries and reads as a server fault.
 
 Argument names are easy to guess wrong. The real ones:
 
@@ -65,6 +70,9 @@ rpc /mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 Expect `serverInfo` naming the server, `"result":{}` for the ping, and all five tools advertised:
 `searchTickets`, `getTicket`, `getChangeset`, `getTimeline`, `getTracInfo`.
 
+The server currently answers with `"protocolVersion":"2024-11-05"` even though the request above
+advertises `2025-06-18`. That is the server pinning the version it implements, not a failure.
+
 ## 3. Tools
 
 Use these public tickets only. Each one is here because it covers a distinct parsing path.
@@ -87,7 +95,7 @@ call /mcp getTicket '{"id":65793}'
 call /mcp getTicket '{"id":62358}'
 call /mcp getChangeset '{"revision":58504,"includeDiff":false}'
 call /mcp getChangeset '{"revision":58504,"includeDiff":true,"diffLimit":500}'
-call /mcp getTimeline '{"days":1,"limit":5}'
+call /mcp getTimeline '{"days":7,"limit":5}'
 call /mcp getTracInfo '{"type":"components"}'
 call /mcp getTracInfo '{"type":"milestones"}'
 ```
@@ -105,7 +113,10 @@ What to look for:
   folded into the comment list.
 - `getChangeset` returns the revision, author, date, message, and file list. With `includeDiff`, the
   text includes diff hunks and respects `diffLimit`.
-- `getTimeline` returns recent events, and `getTracInfo` returns the requested vocabulary.
+- `getTimeline` returns recent events, and `getTracInfo` returns the requested vocabulary. A seven
+  day window is used because a quiet day can legitimately produce no events; an empty list is a
+  valid answer for any short window, so judge this check on the request succeeding rather than on
+  the count.
 
 ## 4. Pagination
 
@@ -149,8 +160,13 @@ come back as `-32602` invalid params with the failing field named. A malformed r
 Work through these in order before changing a parser.
 
 1. **Does the same check pass locally?** Run the list against `pnpm dev` on current `main`. If local
-   passes and the deployment fails, the deployment is behind. Compare the version on the landing
-   page against `main`.
+   passes and the deployment fails, the deployment is behind.
+
+   To confirm that, compare behavior rather than version strings. Run `tools/list` against both and
+   diff the advertised arguments: a deployment missing a field that `main` advertises is stale. The
+   version on the landing page is Cloudflare's opaque Worker version ID, not a git commit, so it
+   cannot be matched against a branch. Its deployment timestamp is the useful part; the Cloudflare
+   dashboard's deployment history maps that ID to what shipped.
 2. **Did Trac change, or did we?** Fetch the upstream URL by hand and look at the markup. Trac
    changing its HTML and our parser regressing produce the same symptom.
 3. **Is it the fixture?** These are real public tickets and their content can move. A ticket that
