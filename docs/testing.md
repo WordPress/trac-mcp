@@ -27,6 +27,7 @@ Start the Worker with `pnpm dev`, then use harmless public ticket and changeset 
 4. Exercise each standard tool:
    - Search a keyword and a structured filter.
    - Read ticket `65739` with and without comments.
+   - Read ticket `65808` and confirm its linked pull request data is present.
    - Read changeset `58504` with and without its diff.
    - Read one day of timeline activity.
    - List components and milestones.

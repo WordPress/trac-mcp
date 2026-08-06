@@ -17,7 +17,7 @@ The standard `/mcp` endpoint provides:
 | Tool | Purpose |
 | --- | --- |
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
-| `getTicket` | Read a ticket, its metadata, and recent comments |
+| `getTicket` | Read a ticket, its metadata, recent comments, and linked pull requests |
 | `getChangeset` | Read a changeset and an optional truncated diff |
 | `getTimeline` | Read recent Trac activity |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
@@ -92,7 +92,8 @@ pnpm deploy:production
 
 - The server is read-only and has no Trac credentials.
 - Tool inputs receive runtime validation before any upstream request.
-- Upstream requests use the fixed `core.trac.wordpress.org` host.
+- Upstream requests use the fixed `core.trac.wordpress.org` host and the official linked-PR
+  endpoint on `api.wordpress.org`.
 - Responses are parsed from public Trac pages and machine-readable formats.
 - The Worker keeps no ticket cache or durable state.
 

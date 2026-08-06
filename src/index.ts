@@ -45,6 +45,31 @@ const ChatGptSearchArgsSchema = z.object({
 const ChatGptFetchArgsSchema = z.object({
   id: z.string().regex(/^(?:r\d+|\d+)$/, 'Use a ticket number or an r-prefixed changeset'),
 });
+const LinkedPullRequestSchema = z.object({
+  number: z.number().int().positive(),
+  repo: z.string(),
+  state: z.string(),
+  title: z.string(),
+  user: z.object({
+    name: z.string(),
+    url: z.string().url(),
+  }),
+  created_at: z.string(),
+  updated_at: z.string(),
+  closed_at: z.string().nullable(),
+  changes: z.object({
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    patch_url: z.string().url(),
+    html_url: z.string().url(),
+  }),
+  touches_tests: z.boolean(),
+  check_runs: z.record(z.string()),
+  reviews: z.record(z.array(z.string())),
+  mergeable_state: z.string(),
+  body: z.string().nullable(),
+  html_url: z.string().url(),
+});
 
 class UnknownToolError extends Error {}
 
@@ -83,6 +108,27 @@ type TicketHistoryEntry = {
   changes: string;
   comment: string;
   url: string;
+};
+
+type LinkedPullRequest = {
+  number: number;
+  repository: string;
+  state: string;
+  title: string;
+  author: string;
+  authorUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  additions: number;
+  deletions: number;
+  touchesTests: boolean;
+  checkRuns: Record<string, string>;
+  reviews: Record<string, string[]>;
+  mergeableState: string;
+  patchUrl: string;
+  url: string;
+  body: string;
 };
 
 const HTML_ENTITIES: Record<string, string> = {
@@ -261,6 +307,46 @@ function ticketFromRecord(record: TracRecord) {
   };
 }
 
+async function fetchLinkedPullRequests(ticketId: number): Promise<LinkedPullRequest[]> {
+  const pullRequestsUrl = new URL('https://api.wordpress.org/dotorg/trac/pr/');
+  pullRequestsUrl.searchParams.set('trac', 'core');
+  pullRequestsUrl.searchParams.set('ticket', ticketId.toString());
+
+  const response = await fetch(pullRequestsUrl.toString(), {
+    headers: {
+      'User-Agent': TRAC_USER_AGENT,
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch linked pull requests: ${response.statusText}`);
+  }
+
+  return z
+    .array(LinkedPullRequestSchema)
+    .parse(await response.json())
+    .map((pullRequest) => ({
+      number: pullRequest.number,
+      repository: pullRequest.repo,
+      state: pullRequest.state,
+      title: pullRequest.title,
+      author: pullRequest.user.name,
+      authorUrl: pullRequest.user.url,
+      createdAt: pullRequest.created_at,
+      updatedAt: pullRequest.updated_at,
+      closedAt: pullRequest.closed_at,
+      additions: pullRequest.changes.additions,
+      deletions: pullRequest.changes.deletions,
+      touchesTests: pullRequest.touches_tests,
+      checkRuns: pullRequest.check_runs,
+      reviews: pullRequest.reviews,
+      mergeableState: pullRequest.mergeable_state,
+      patchUrl: pullRequest.changes.patch_url,
+      url: pullRequest.html_url,
+      body: pullRequest.body ?? '',
+    }));
+}
+
 export async function searchTracTickets(
   query: string,
   limit: number,
@@ -336,9 +422,12 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   addColumns(queryUrl, TICKET_COLUMNS);
 
   const rssUrl = `https://core.trac.wordpress.org/ticket/${ticketId}?format=rss`;
-  const [records, rssResponse] = await Promise.all([
+  const [records, rssResponse, linkedPullRequestsResult] = await Promise.all([
     fetchCsvRecords(queryUrl),
     fetch(rssUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
+    fetchLinkedPullRequests(ticketId)
+      .then((linkedPullRequests) => ({ linkedPullRequests, unavailable: false }))
+      .catch(() => ({ linkedPullRequests: [], unavailable: true })),
   ]);
 
   const record = records.find((candidate) => Number.parseInt(candidate.id ?? '', 10) === ticketId);
@@ -364,7 +453,13 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   const comments = includeComments && limit > 0 ? allHistory.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
 
-  return { ticket, comments, totalComments: allHistory.length };
+  return {
+    ticket,
+    comments,
+    totalComments: allHistory.length,
+    linkedPullRequests: linkedPullRequestsResult.linkedPullRequests,
+    linkedPullRequestsUnavailable: linkedPullRequestsResult.unavailable,
+  };
 }
 
 function formatTicketResult(
@@ -372,7 +467,8 @@ function formatTicketResult(
   includeComments: boolean,
   stringId = false
 ) {
-  const { ticket, comments, totalComments } = ticketData;
+  const { ticket, comments, totalComments, linkedPullRequests, linkedPullRequestsUnavailable } =
+    ticketData;
   const historyText =
     includeComments && comments.length > 0
       ? `\n\nRecent history:\n${comments
@@ -381,6 +477,30 @@ function formatTicketResult(
               .filter(Boolean)
               .join(' — ');
             return `${heading}\n${entry.comment}`.trim();
+          })
+          .join('\n\n')}`
+      : '';
+  const linkedPullRequestsText = linkedPullRequestsUnavailable
+    ? '\n\nLinked pull requests: unavailable'
+    : linkedPullRequests.length
+      ? `\n\nLinked pull requests:\n${linkedPullRequests
+          .map((pullRequest) => {
+            const checks = Object.entries(pullRequest.checkRuns)
+              .map(([name, status]) => `${name}: ${status}`)
+              .join(', ');
+            const reviews = Object.entries(pullRequest.reviews)
+              .map(([verdict, reviewers]) => `${verdict}: ${reviewers.join(', ')}`)
+              .join('; ');
+            return `${pullRequest.repository}#${pullRequest.number}: ${pullRequest.title}
+State: ${pullRequest.state}
+Author: ${pullRequest.author}
+CI: ${checks || 'No check results'}
+Reviews: ${reviews || 'No reviews'}
+Touches tests: ${pullRequest.touchesTests ? 'yes' : 'no'}
+Changes: +${pullRequest.additions}/-${pullRequest.deletions}
+URL: ${pullRequest.url}
+
+${pullRequest.body || 'No pull request description'}`;
           })
           .join('\n\n')}`
       : '';
@@ -404,13 +524,15 @@ Keywords: ${ticket.keywords}
 Focuses: ${ticket.focuses}
 
 Description:
-${ticket.description}${historyText}`,
+${ticket.description}${linkedPullRequestsText}${historyText}`,
     url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
     metadata: {
       ticket,
       comments,
       totalComments,
       returnedComments: comments.length,
+      linkedPullRequests,
+      linkedPullRequestsUnavailable,
     },
   };
 }
