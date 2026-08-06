@@ -74,6 +74,8 @@ const LinkedPullRequestSchema = z.object({
 class UnknownToolError extends Error {}
 
 const TRAC_USER_AGENT = 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)';
+const TRAC_ORIGIN = 'https://core.trac.wordpress.org';
+const TRAC_RETRY_DELAYS_MS = [2000, 4000, 8000] as const;
 const TICKET_COLUMNS = [
   'id',
   'summary',
@@ -100,6 +102,47 @@ type TicketSearchFilters = {
   milestone?: string | undefined;
   resolution?: string | undefined;
 };
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function isTransientTracResponse(response: Response): Promise<boolean> {
+  if (response.status === 429 || response.status >= 500) {
+    return true;
+  }
+  if (response.status !== 403) {
+    return false;
+  }
+
+  return /Checking your browser/i.test(await response.clone().text());
+}
+
+export async function fetchTrac(
+  input: string | URL,
+  init?: RequestInit,
+  retryDelays: readonly number[] = TRAC_RETRY_DELAYS_MS
+): Promise<Response> {
+  const url = new URL(input);
+  if (url.origin !== TRAC_ORIGIN) {
+    throw new Error(`Refusing non-Trac request host: ${url.hostname}`);
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(url.toString(), init);
+      if (!(await isTransientTracResponse(response)) || attempt >= retryDelays.length) {
+        return response;
+      }
+    } catch (error) {
+      if (attempt >= retryDelays.length) {
+        throw error;
+      }
+    }
+
+    await wait(retryDelays[attempt] ?? 0);
+  }
+}
 
 type TicketHistoryEntry = {
   id: number | null;
@@ -446,7 +489,7 @@ export function addTicketSearchQuery(url: URL, query: string): void {
 }
 
 async function fetchCsvRecords(url: URL): Promise<TracRecord[]> {
-  const response = await fetch(url.toString(), {
+  const response = await fetchTrac(url, {
     headers: {
       'User-Agent': TRAC_USER_AGENT,
       Accept: 'text/csv,text/plain,*/*',
@@ -562,7 +605,7 @@ export async function searchTracTickets(
   totalUrl.searchParams.delete('page');
   const [records, totalResponse] = await Promise.all([
     fetchCsvRecords(queryUrl),
-    fetch(totalUrl.toString(), { headers: { 'User-Agent': TRAC_USER_AGENT } }),
+    fetchTrac(totalUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
   ]);
   const tickets = records.map(ticketFromRecord);
   if (!totalResponse.ok) {
@@ -603,7 +646,7 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   const rssUrl = `https://core.trac.wordpress.org/ticket/${ticketId}?format=rss`;
   const [records, rssResponse, linkedPullRequestsResult] = await Promise.all([
     fetchCsvRecords(queryUrl),
-    fetch(rssUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
+    fetchTrac(rssUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
     fetchLinkedPullRequests(ticketId)
       .then((linkedPullRequests) => ({ linkedPullRequests, unavailable: false }))
       .catch(() => ({ linkedPullRequests: [], unavailable: true })),
@@ -736,7 +779,7 @@ ${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText
 
 async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit = 2000) {
   const changesetUrl = `https://core.trac.wordpress.org/changeset/${revision}`;
-  const response = await fetch(changesetUrl, {
+  const response = await fetchTrac(changesetUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
 
@@ -762,7 +805,7 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
   let diff = '';
   if (includeDiff) {
     try {
-      const diffResponse = await fetch(`${changesetUrl}?format=diff`, {
+      const diffResponse = await fetchTrac(`${changesetUrl}?format=diff`, {
         headers: { 'User-Agent': TRAC_USER_AGENT },
       });
       if (diffResponse.ok) {
@@ -811,7 +854,7 @@ ${changeset.diff ? `Diff:\n${changeset.diff}` : 'No diff available'}`,
 async function fetchTracFieldOptions(field: 'component' | 'severity'): Promise<string[]> {
   const queryUrl = new URL('https://core.trac.wordpress.org/query');
   queryUrl.searchParams.set(field, '');
-  const response = await fetch(queryUrl.toString(), {
+  const response = await fetchTrac(queryUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
 
@@ -873,7 +916,7 @@ async function fetchTimeline(days: number, limit: number) {
   timelineUrl.searchParams.set('ticket_details', 'on');
   timelineUrl.searchParams.set('repo-', 'on');
 
-  const response = await fetch(timelineUrl.toString(), {
+  const response = await fetchTrac(timelineUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
   if (!response.ok) {

@@ -94,6 +94,8 @@ pnpm deploy:production
 - Tool inputs receive runtime validation before any upstream request.
 - Upstream requests use the fixed `core.trac.wordpress.org` host and the official linked-PR
   endpoint on `api.wordpress.org`.
+- Transient transport failures, rate limits, server errors, and Trac bot challenges receive bounded
+  retries. Permanent 403 and 404 responses return immediately.
 - Responses are parsed from public Trac pages and machine-readable formats.
 - The Worker keeps no ticket cache or durable state.
 
