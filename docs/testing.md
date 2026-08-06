@@ -19,7 +19,7 @@ Tests mock Trac responses. They should not depend on Trac availability or mutabl
 
 ## Manual smoke test
 
-Start the Worker with `pnpm dev`, then use harmless public ticket and changeset IDs. See [smoke-test.md](smoke-test.md) for the same list as runnable commands with expected results.
+Start the Worker by following [local-development.md](local-development.md), then use harmless public ticket and changeset IDs. See [smoke-test.md](smoke-test.md) for the same list as runnable commands with expected results.
 
 1. Confirm `/health` returns `200 OK` and `/` renders the landing page.
 2. Send `OPTIONS /mcp`; expect `204` and CORS headers.

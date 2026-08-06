@@ -96,6 +96,10 @@ pnpm install
 pnpm dev
 ```
 
+Open `http://localhost:8787/` to view the local landing page. See
+[docs/local-development.md](docs/local-development.md) for the full browser-preview workflow and
+troubleshooting.
+
 Run the complete local quality gate:
 
 ```bash
