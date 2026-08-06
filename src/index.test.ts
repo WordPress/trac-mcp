@@ -192,6 +192,16 @@ describe('Trac retries', () => {
   });
 });
 
+describe('Landing page', () => {
+  it('links the landing page to its source and contribution workflow', async () => {
+    const response = await worker.fetch(new Request('https://example.com/'), {}, context);
+    const html = await response.text();
+
+    expect(response.headers.get('Content-Type')).toBe('text/html');
+    expect(html).toContain('href="https://github.com/WordPress/trac-mcp"');
+  });
+});
+
 describe('MCP transport', () => {
   it('answers endpoint preflight requests', async () => {
     const response = await worker.fetch(

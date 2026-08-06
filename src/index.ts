@@ -1524,6 +1524,22 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
     a:hover {
       text-decoration: underline;
     }
+
+    .contribute {
+      margin-top: 2rem;
+      padding: 1.5rem;
+      background: #f6f8fa;
+      border: 1px solid #e1e4e8;
+      border-radius: 6px;
+    }
+
+    .contribute h2 {
+      margin-top: 0;
+    }
+
+    .contribute p:last-child {
+      margin-bottom: 0;
+    }
     
     .footer {
       margin-top: 3rem;
@@ -1595,6 +1611,12 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
 4. Add as research source if needed</code>
   </div>
   <p>See: <a href="https://platform.openai.com/docs/mcp#connect-in-chatgpt">ChatGPT MCP Documentation</a></p>
+
+  <section class="contribute">
+    <h2>Contribute</h2>
+    <p>This server is open source. Report an issue or help improve the server, documentation, and tests.</p>
+    <p><a href="https://github.com/WordPress/trac-mcp">View the source and contribute on GitHub</a></p>
+  </section>
   
   <div class="footer">
     <p><a href="https://core.trac.wordpress.org/">WordPress Trac</a> • <a href="https://modelcontextprotocol.io/">MCP Docs</a> • an experiment by <a href="https://automattic.ai">A8C AI</a></p>
