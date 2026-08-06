@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "build": "wrangler deploy --dry-run --env=\"\"",
+    "build:production": "wrangler deploy --dry-run --env production",
     "deploy": "wrangler deploy --env=\"\"",
     "deploy:production": "wrangler deploy --env production",
     "format": "biome format --write .",
@@ -16,7 +17,7 @@
     "type-check": "tsc --noEmit",
     "cf-typegen": "wrangler types",
     "test": "vitest run",
-    "check": "pnpm run type-check && pnpm run lint && pnpm run test && pnpm run build"
+    "check": "pnpm run type-check && pnpm run lint && pnpm run test && pnpm run build && pnpm run build:production"
   },
   "keywords": [
     "mcp",
