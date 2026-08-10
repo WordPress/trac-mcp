@@ -31,7 +31,7 @@ The standard `/mcp` endpoint provides:
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
 | `getTicket` | Read a ticket, its attachments, changesets, recent human discussion, and linked pull requests |
 | `getChangeset` | Read a changeset and an optional truncated diff |
-| `getTimeline` | Read Trac activity for recent days or a historical date range, with author filtering and pagination |
+| `getTimeline` | Read Trac activity for recent days or a historical date range, with author filtering and day-granular coverage |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
 
 `getChangeset` expects the numeric `revision` argument, not `rev`:
@@ -61,26 +61,40 @@ ticket and an `r` prefix for a changeset: `65739` and `r58504`.
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
 separate argument overrides the same field in `query`. Results include pagination metadata.
 
-### Timeline ranges, authors, and pagination
+### Timeline ranges, authors, and coverage
 
 `getTimeline` reads the last `days` days (default 7, max 30) or an explicit `from`/`to` date range,
 which reaches arbitrarily far back but may span at most 90 days per request because the upstream
-timeline caps its lookback. `days` cannot be combined with `from`/`to`:
+timeline caps its lookback. Dates are inclusive UTC calendar days: `days` counts whole days ending
+today, `from` on its own ends at today, and `to` on its own covers the seven days ending at `to`. A
+`to` in the future is rejected, and `days` cannot be combined with `from`/`to`:
 
 ```json
 {
   "from": "2005-01-01",
   "to": "2005-01-31",
   "author": "saxmatt",
-  "limit": 100
+  "limit": 20
 }
 ```
 
-`author` takes one Trac username or a list of up to ten. Trac filters by author before the event
-limit applies, so a contributor's events stay complete even inside a busy window. Responses report
-`returnedEvents`, `hasMore`, and `nextPage`; request the next `page` until `hasMore` is `false` to
-paginate without gaps or duplicates. `totalEvents` appears once the window is fully enumerated, and
-`page` times `limit` may not exceed 1000 events.
+`author` takes one Trac username or a list of up to ten. The server filters by author before the
+event limit applies, so a contributor's events stay complete even inside a busy window.
+
+`limit` (1 to 100, default 20) is advisory. A response covers whole calendar days: results are
+rounded down to a day boundary, and the newest day of the window comes back in full even when it
+holds more events than `limit`.
+
+Each response lists events newest first in `results` and reports `requested`, the window that was
+asked for, and `covered`, the part of it this response covers completely. `complete` says whether
+the response covered all of it. When it is `false`, `continueWith` carries a ready-made `from`/`to`
+for the remainder: send it back to `getTimeline` and repeat until a response reports `complete` as
+`true`, or until a response arrives without a `continueWith`. A continuation window always ends on
+a day already past, so walking one cannot produce gaps or duplicates. `note` states the coverage in
+plain language, and coverage that includes today is accurate as of the request.
+
+[docs/timeline-pagination.md](docs/timeline-pagination.md) records why the timeline reports day
+coverage instead of page numbers.
 
 ## Connect
 

@@ -35,44 +35,68 @@ const GetChangesetArgsSchema = z.object({
 // core.trac.wordpress.org clamps the timeline's daysback parameter at Trac's
 // default max_daysback of 90; wider requests silently lose the oldest events.
 const TIMELINE_MAX_WINDOW_DAYS = 90;
-const TIMELINE_MAX_EVENT_OFFSET = 1000;
+const TIMELINE_DEFAULT_WINDOW_DAYS = 7;
+// The timeline feed honours max up to 1001. One generous fetch covers far more
+// than a busy core.trac day, and the day-based coverage report below stays
+// honest when it is not enough.
+const TIMELINE_FETCH_MAX = 500;
 const DAY_IN_MS = 86_400_000;
+const TIMELINE_DATE_PATTERN = '^\\d{4}-\\d{2}-\\d{2}$';
+// A leading alphanumeric keeps user input from reaching Trac's `-author`
+// exclusion syntax, and the quote-free charset makes quoting spaced names safe.
+// Leading, trailing, and doubled spaces are rejected because Trac quotes them
+// verbatim into the authors filter, where they match nobody.
+const TIMELINE_AUTHOR_PATTERN = '^[A-Za-z0-9](?: ?[A-Za-z0-9@._-])*$';
 
 function timelineDayTimestamp(value: string): number {
   const [year = 0, month = 0, day = 0] = value.split('-').map(Number);
-  const timestamp = Date.UTC(year, month - 1, day);
-  const date = new Date(timestamp);
-  // Date.UTC rolls impossible dates such as 2005-02-31 over into the next
-  // month, so only a component roundtrip proves the date was real.
+  // Date.UTC maps years 0-99 onto 1900-1999 while setUTCFullYear does not, so
+  // dates such as 0099-12-31 survive the roundtrip check below.
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  // Impossible dates such as 2005-02-31 roll over into the next month, so only
+  // a component roundtrip proves the date was real.
   return date.getUTCFullYear() === year &&
     date.getUTCMonth() === month - 1 &&
     date.getUTCDate() === day
-    ? timestamp
+    ? date.getTime()
     : Number.NaN;
+}
+
+function timelineDay(timestamp: number): string {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function shiftTimelineDay(day: string, offset: number): string {
+  return timelineDay(timelineDayTimestamp(day) + offset * DAY_IN_MS);
+}
+
+function timelineDaySpan(from: string, to: string): number {
+  return Math.round((timelineDayTimestamp(to) - timelineDayTimestamp(from)) / DAY_IN_MS);
 }
 
 const TimelineDateSchema = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Dates must be ISO-8601 (YYYY-MM-DD)');
-// A leading alphanumeric keeps user input from reaching Trac's `-author`
-// exclusion syntax; the quote-free charset makes quoting spaced names safe.
+  .regex(new RegExp(TIMELINE_DATE_PATTERN), 'Dates must be ISO-8601 (YYYY-MM-DD)');
 const TimelineAuthorSchema = z
   .string()
   .regex(
-    /^[a-z0-9][a-z0-9 @._-]{0,49}$/i,
-    'Authors must be Trac usernames: letters or numbers, then letters, numbers, spaces, or @._-'
-  );
-const GetTimelineArgsSchema = z
+    new RegExp(TIMELINE_AUTHOR_PATTERN),
+    'Authors must be Trac usernames: letters or numbers, then letters, numbers, single interior spaces, or @._-'
+  )
+  .max(50);
+export const GetTimelineArgsSchema = z
   .object({
     days: z.number().int().min(1).max(30).optional(),
     limit: z.number().int().min(1).max(100).default(20),
-    page: z.number().int().min(1).default(1),
     from: TimelineDateSchema.optional(),
     to: TimelineDateSchema.optional(),
     author: z
       .union([TimelineAuthorSchema, z.array(TimelineAuthorSchema).min(1).max(10)])
       .optional(),
   })
+  // Only clock-independent rules belong here; the window itself is resolved and
+  // validated against a single reading of the clock in resolveTimelineQuery.
   .superRefine((args, ctx) => {
     if (args.days !== undefined && (args.from !== undefined || args.to !== undefined)) {
       ctx.addIssue({
@@ -92,28 +116,6 @@ const GetTimelineArgsSchema = z
         });
         return;
       }
-    }
-    if (args.from !== undefined) {
-      const endDate = args.to ?? new Date().toISOString().slice(0, 10);
-      const windowDays =
-        (timelineDayTimestamp(endDate) - timelineDayTimestamp(args.from)) / DAY_IN_MS;
-      if (windowDays < 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'from must not be later than to',
-        });
-      } else if (windowDays > TIMELINE_MAX_WINDOW_DAYS) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `The from-to window may span at most ${TIMELINE_MAX_WINDOW_DAYS} days per request; query adjacent ranges for longer periods`,
-        });
-      }
-    }
-    if (args.page * args.limit > TIMELINE_MAX_EVENT_OFFSET) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `page times limit may not exceed ${TIMELINE_MAX_EVENT_OFFSET} events; narrow the date range instead`,
-      });
     }
   });
 const GetTracInfoArgsSchema = z.object({
@@ -157,6 +159,16 @@ const LinkedPullRequestSchema = z.object({
 });
 
 class UnknownToolError extends Error {}
+// Argument checks that Zod cannot express, reported as JSON-RPC invalid params.
+class InvalidToolArgumentsError extends Error {}
+
+function isInvalidArgumentsError(error: unknown): boolean {
+  return (
+    error instanceof UnknownToolError ||
+    error instanceof InvalidToolArgumentsError ||
+    error instanceof z.ZodError
+  );
+}
 
 const TRAC_USER_AGENT = 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)';
 const TRAC_ORIGIN = 'https://core.trac.wordpress.org';
@@ -991,39 +1003,156 @@ async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
   return Array.from(new Set(values)).sort();
 }
 
+type TimelineWindow = { from: string; to: string };
 type TimelineQuery = ReturnType<typeof resolveTimelineQuery>;
 
-function resolveTimelineQuery(args: z.infer<typeof GetTimelineArgsSchema>) {
-  const today = new Date().toISOString().slice(0, 10);
-  const endDate = args.to ?? today;
-  const endTimestamp = timelineDayTimestamp(endDate);
-  const daysBack =
-    args.from !== undefined
-      ? Math.round((endTimestamp - timelineDayTimestamp(args.from)) / DAY_IN_MS)
-      : (args.days ?? 7);
+// `today` is read once per request and threaded through: resolving the window
+// against a second clock reading could cross UTC midnight and stretch an
+// already validated 90-day window past max_daysback, which Trac clamps in
+// silence.
+function resolveTimelineQuery(args: z.infer<typeof GetTimelineArgsSchema>, today: string) {
+  if (args.to !== undefined && args.to > today) {
+    throw new InvalidToolArgumentsError(`to must not be later than today (${today}): ${args.to}`);
+  }
+
+  const to = args.to ?? today;
+  // days and the default window are inclusive day counts ending at `to`.
+  const from = args.from ?? shiftTimelineDay(to, 1 - (args.days ?? TIMELINE_DEFAULT_WINDOW_DAYS));
+  const span = timelineDaySpan(from, to);
+  if (span < 0) {
+    throw new InvalidToolArgumentsError('from must not be later than to');
+  }
+  if (span > TIMELINE_MAX_WINDOW_DAYS) {
+    throw new InvalidToolArgumentsError(
+      `The from-to window may span at most ${TIMELINE_MAX_WINDOW_DAYS} days per request; query adjacent ranges for longer periods`
+    );
+  }
 
   return {
-    endDate,
-    startDate: new Date(endTimestamp - daysBack * DAY_IN_MS).toISOString().slice(0, 10),
-    daysBack,
+    requested: { from, to } satisfies TimelineWindow,
+    today,
     authors: typeof args.author === 'string' ? [args.author] : (args.author ?? []),
     limit: args.limit,
-    page: args.page,
   };
 }
 
-async function fetchTimeline({ endDate, daysBack, authors, limit, page }: TimelineQuery) {
+function timelineEventDay(date: string): string {
+  const timestamp = Date.parse(date);
+  return Number.isNaN(timestamp) ? '' : timelineDay(timestamp);
+}
+
+function timelineNote(
+  requested: TimelineWindow,
+  covered: TimelineWindow,
+  continueWith: TimelineWindow | undefined,
+  cappedDay: string,
+  today: string
+): string {
+  const sentences = [
+    continueWith === undefined && cappedDay === ''
+      ? `Covered the full requested window ${covered.from} to ${covered.to}.`
+      : `Covered ${covered.from} to ${covered.to} of the requested ${requested.from} to ${requested.to}.`,
+  ];
+  if (cappedDay !== '') {
+    sentences.push(
+      `${cappedDay} alone filled the ${TIMELINE_FETCH_MAX}-event fetch limit, so only its newest events are included and that day is incomplete.`
+    );
+  }
+  if (continueWith !== undefined) {
+    sentences.push(
+      `Call getTimeline again with from ${continueWith.from} and to ${continueWith.to} for the rest.`
+    );
+  }
+  if (covered.to === today) {
+    sentences.push("Today's events reflect the time of the request.");
+  }
+
+  return sentences.join(' ');
+}
+
+function buildTimelineResult(rawItems: RssItem[], query: TimelineQuery) {
+  const { requested, today, authors, limit } = query;
+  const truncated = rawItems.length >= TIMELINE_FETCH_MAX;
+  const dated = rawItems
+    .map((item) => ({ item, day: timelineEventDay(item.date) }))
+    .filter((event) => event.day !== '');
+  // The feed is newest-first, so the `to` edge is always complete and only the
+  // oldest fetched day can have been cut in half by the fetch limit.
+  const oldestFetchedDay = dated.at(-1)?.day ?? requested.from;
+  let coveredFrom = requested.from;
+  let cappedDay = '';
+  if (truncated && oldestFetchedDay >= requested.to) {
+    // Every fetched event landed on one day, so no complete day is available.
+    cappedDay = requested.to;
+    coveredFrom = requested.to;
+  } else if (truncated && oldestFetchedDay >= requested.from) {
+    // An older day than this one is missing outright, and this one is only
+    // half fetched, so coverage starts the day after it.
+    coveredFrom = shiftTimelineDay(oldestFetchedDay, 1);
+  }
+
+  // Post-filtering to the requested window makes the fetch immune to Trac's
+  // daysback semantics: the upstream window only has to be generous.
+  let events = dated.filter((event) => event.day >= coveredFrom && event.day <= requested.to);
+  // limit is advisory because the day is the smallest unit Trac can address:
+  // trim whole days from the oldest end, and keep one oversized day intact.
+  while (events.length > limit) {
+    const oldestDay = events.at(-1)?.day;
+    if (oldestDay === undefined || oldestDay === events[0]?.day) {
+      break;
+    }
+    events = events.filter((event) => event.day !== oldestDay);
+    coveredFrom = shiftTimelineDay(oldestDay, 1);
+  }
+
+  const covered: TimelineWindow = { from: coveredFrom, to: requested.to };
+  const continueWith =
+    covered.from > requested.from
+      ? { from: requested.from, to: shiftTimelineDay(covered.from, -1) }
+      : undefined;
+
+  return {
+    results: events.map(({ item }, index) => ({
+      id: item.link || `event-${index}`,
+      title: item.title || 'Unknown Event',
+      text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
+      url: item.link,
+      metadata: {
+        date: item.date,
+        author: item.author,
+        description: item.description,
+      },
+    })),
+    returned: events.length,
+    requested,
+    covered,
+    complete: cappedDay === '' && covered.from === requested.from,
+    ...(continueWith === undefined ? {} : { continueWith }),
+    ...(authors.length > 0 ? { authors } : {}),
+    note: timelineNote(requested, covered, continueWith, cappedDay, today),
+    timelineUrl: 'https://core.trac.wordpress.org/timeline',
+  };
+}
+
+async function fetchTimeline(query: TimelineQuery) {
+  const { requested, authors } = query;
   const timelineUrl = new URL('https://core.trac.wordpress.org/timeline');
-  timelineUrl.searchParams.set('from', endDate);
-  timelineUrl.searchParams.set('daysback', daysBack.toString());
-  // Fetch one event past the requested page so hasMore is exact.
-  timelineUrl.searchParams.set('max', (page * limit + 1).toString());
+  timelineUrl.searchParams.set('from', requested.to);
+  // daysback counts whole days back from an inclusive `from` day, and Trac
+  // clamps 0 to 1. One day of slack keeps the fetch generous in both cases;
+  // buildTimelineResult filters the events back to the requested window.
+  timelineUrl.searchParams.set(
+    'daysback',
+    (timelineDaySpan(requested.from, requested.to) + 1).toString()
+  );
+  timelineUrl.searchParams.set('max', TIMELINE_FETCH_MAX.toString());
   timelineUrl.searchParams.set('format', 'rss');
   timelineUrl.searchParams.set('ticket', 'on');
   timelineUrl.searchParams.set('ticket_details', 'on');
   timelineUrl.searchParams.set('repo-', 'on');
   if (authors.length > 0) {
-    // Trac splits the authors filter on spaces unless the name is quoted.
+    // Trac splits the authors filter on spaces unless the name is quoted, and
+    // applies it before max truncates the feed.
     timelineUrl.searchParams.set(
       'authors',
       authors.map((name) => (name.includes(' ') ? `"${name}"` : name)).join(' ')
@@ -1037,25 +1166,7 @@ async function fetchTimeline({ endDate, daysBack, authors, limit, page }: Timeli
     throw new Error(`Failed to fetch timeline: ${response.statusText}`);
   }
 
-  const items = parseRssItems(await response.text());
-  const hasMore = items.length > page * limit;
-  const events = items.slice((page - 1) * limit, page * limit).map((item, index) => ({
-    id: item.link || `event-${index}`,
-    title: item.title || 'Unknown Event',
-    text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
-    url: item.link,
-    metadata: {
-      date: item.date,
-      author: item.author,
-      description: item.description,
-    },
-  }));
-
-  return {
-    events,
-    hasMore,
-    totalEvents: hasMore ? null : items.length,
-  };
+  return buildTimelineResult(parseRssItems(await response.text()), query);
 }
 
 function jsonRpcResult(id: JsonRpcRequest['id'], result: unknown) {
@@ -1126,22 +1237,8 @@ async function executeStandardTool(name: string, input: unknown): Promise<unknow
     }
 
     case 'getTimeline': {
-      const query = resolveTimelineQuery(GetTimelineArgsSchema.parse(input ?? {}));
-      const { events, hasMore, totalEvents } = await fetchTimeline(query);
-      return {
-        results: events,
-        returnedEvents: events.length,
-        ...(totalEvents === null ? {} : { totalEvents }),
-        hasMore,
-        nextPage: hasMore ? query.page + 1 : null,
-        page: query.page,
-        pageSize: query.limit,
-        from: query.startDate,
-        to: query.endDate,
-        ...(query.authors.length > 0 ? { authors: query.authors } : {}),
-        daysBack: query.daysBack,
-        timelineUrl: 'https://core.trac.wordpress.org/timeline',
-      };
+      const args = GetTimelineArgsSchema.parse(input ?? {});
+      return fetchTimeline(resolveTimelineQuery(args, timelineDay(Date.now())));
     }
 
     case 'getTracInfo': {
@@ -1285,44 +1382,49 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
             {
               name: 'getTimeline',
               description:
-                'Get activity from the WordPress Trac timeline including tickets, commits, and other events. Supports recent activity (days), arbitrary historical date ranges (from/to, at most 90 days per request), server-side author filtering, and page-based pagination. Responses report returnedEvents, hasMore, and nextPage; totalEvents is included once the window is fully enumerated.',
+                'Get activity from the WordPress Trac timeline including tickets, commits, and other events. Coverage is measured in whole UTC days: the response reports the requested window, the covered window, and whether coverage is complete. When complete is false, call again with the continueWith window to walk further back; those windows end in the past, so they never gap or duplicate. Supports recent activity (days), historical date ranges (from/to, at most 90 days per request), and server-side author filtering.',
               inputSchema: {
                 type: 'object',
                 properties: {
                   days: {
                     type: 'number',
                     description:
-                      'Number of days to look back from today (default: 7, max: 30). Cannot be combined with from or to.',
-                    default: 7,
+                      'Number of inclusive calendar days ending today (UTC), defaults to 7 when neither from nor to is given. Cannot be combined with from or to.',
+                    minimum: 1,
+                    maximum: 30,
                   },
                   from: {
                     type: 'string',
+                    pattern: TIMELINE_DATE_PATTERN,
                     description:
                       'Inclusive ISO-8601 start date (YYYY-MM-DD) for a historical range. The from-to window may span at most 90 days per request; query adjacent ranges for longer periods.',
                   },
                   to: {
                     type: 'string',
+                    pattern: TIMELINE_DATE_PATTERN,
                     description:
-                      'Inclusive ISO-8601 end date (YYYY-MM-DD). Defaults to today when only from is given; to alone covers the 7 days ending at to.',
+                      'Inclusive ISO-8601 end date (YYYY-MM-DD); dates later than today (UTC) are rejected. Defaults to today when only from is given; to alone covers the 7 inclusive days ending at to.',
                   },
                   author: {
                     description:
                       'Trac username, or list of up to 10 usernames, to filter events by author. Filtering happens on the server, so results stay complete even when the unfiltered window holds more events than limit.',
                     anyOf: [
-                      { type: 'string' },
-                      { type: 'array', items: { type: 'string' }, maxItems: 10 },
+                      { type: 'string', pattern: TIMELINE_AUTHOR_PATTERN, maxLength: 50 },
+                      {
+                        type: 'array',
+                        items: { type: 'string', pattern: TIMELINE_AUTHOR_PATTERN, maxLength: 50 },
+                        minItems: 1,
+                        maxItems: 10,
+                      },
                     ],
                   },
                   limit: {
                     type: 'number',
-                    description: 'Maximum number of events per page (default: 20, max: 100)',
-                    default: 20,
-                  },
-                  page: {
-                    type: 'number',
                     description:
-                      'One-based results page (default: 1). page times limit may not exceed 1000. Follow nextPage while hasMore is true to paginate without gaps or duplicates.',
-                    default: 1,
+                      'Advisory maximum number of events (default: 20, max: 100). Results are trimmed to whole days from the oldest end, and the newest day is always returned in full even when it holds more events than limit.',
+                    default: 20,
+                    minimum: 1,
+                    maximum: 100,
                   },
                 },
               },
@@ -1366,7 +1468,7 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
       try {
         return toolResult(id, await executeStandardTool(parsed.data.name, parsed.data.arguments));
       } catch (error) {
-        if (error instanceof UnknownToolError || error instanceof z.ZodError) {
+        if (isInvalidArgumentsError(error)) {
           return jsonRpcError(id, -32602, errorMessage(error));
         }
         return toolResult(id, { error: errorMessage(error) }, true);
@@ -1461,7 +1563,7 @@ Query Types:
       try {
         return toolResult(id, await executeChatGptTool(parsed.data.name, parsed.data.arguments));
       } catch (error) {
-        if (error instanceof UnknownToolError || error instanceof z.ZodError) {
+        if (isInvalidArgumentsError(error)) {
           return jsonRpcError(id, -32602, errorMessage(error));
         }
         return toolResult(id, { error: errorMessage(error) }, true);
@@ -1498,10 +1600,10 @@ async function getChangesetForChatGPT(revision: number, includeDiff: boolean) {
 }
 
 async function getTimelineForChatGPT(days: number, limit: number) {
-  const { events } = await fetchTimeline(
-    resolveTimelineQuery(GetTimelineArgsSchema.parse({ days, limit }))
+  const { results } = await fetchTimeline(
+    resolveTimelineQuery(GetTimelineArgsSchema.parse({ days, limit }), timelineDay(Date.now()))
   );
-  return { results: events };
+  return { results };
 }
 
 async function runChatGptSearch(query: string) {

@@ -3,6 +3,7 @@ import worker, {
   addTicketSearchQuery,
   cleanTracText,
   fetchTrac,
+  GetTimelineArgsSchema,
   parseCsvRecords,
   parseTicketFilter,
   searchTracTickets,
@@ -18,6 +19,20 @@ type RpcBody = {
   };
 };
 
+type TimelineWindow = { from: string; to: string };
+type TimelineResult = {
+  results: Array<{ url: string; metadata: { date: string; author: string } }>;
+  returned: number;
+  requested: TimelineWindow;
+  covered: TimelineWindow;
+  complete: boolean;
+  continueWith?: TimelineWindow;
+  authors?: string[];
+  note: string;
+};
+
+const EMPTY_RSS = '<?xml version="1.0"?><rss><channel></channel></rss>';
+
 function mcpRequest(body: unknown, path = '/mcp') {
   return worker.fetch(
     new Request(`https://example.com${path}`, {
@@ -27,6 +42,126 @@ function mcpRequest(body: unknown, path = '/mcp') {
     }),
     {},
     context
+  );
+}
+
+async function callTimeline(args: Record<string, unknown>): Promise<TimelineResult> {
+  const response = await mcpRequest({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: { name: 'getTimeline', arguments: args },
+  });
+  const body = (await response.json()) as RpcBody;
+  return JSON.parse(body.result.content.at(0)?.text ?? '{}');
+}
+
+// Newest-first changeset events, the shape core.trac's timeline RSS returns.
+function timelineRss(days: Array<[day: string, count: number]>) {
+  let revision = 60000;
+  const items = days.flatMap(([day, count]) =>
+    Array.from({ length: count }, () => {
+      revision -= 1;
+      return `<item>
+        <title>Changeset [${revision}]</title>
+        <dc:creator>saxmatt</dc:creator>
+        <pubDate>${new Date(`${day}T12:00:00Z`).toUTCString()}</pubDate>
+        <link>https://core.trac.wordpress.org/changeset/${revision}</link>
+        <description>change on ${day}</description>
+      </item>`;
+    })
+  );
+  return `<?xml version="1.0"?><rss><channel>${items.join('')}</channel></rss>`;
+}
+
+function stubTimelineFetch(rss: string) {
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(rss));
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+function timelineParams(fetchMock: ReturnType<typeof stubTimelineFetch>) {
+  return Object.fromEntries(new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '').searchParams);
+}
+
+function resultDays(result: TimelineResult) {
+  return result.results.map((event) => new Date(event.metadata.date).toISOString().slice(0, 10));
+}
+
+type ZodCheck = { kind: string; value?: number; regex?: RegExp };
+type ZodInternal = {
+  _def: {
+    typeName: string;
+    innerType?: ZodInternal;
+    schema?: ZodInternal;
+    options?: ZodInternal[];
+    type?: ZodInternal;
+    shape?: () => Record<string, ZodInternal>;
+    checks?: ZodCheck[];
+    minLength?: { value: number } | null;
+    maxLength?: { value: number } | null;
+    defaultValue?: () => unknown;
+  };
+};
+
+function zodCheck(def: ZodInternal['_def'], kind: string) {
+  return def.checks?.find((check) => check.kind === kind);
+}
+
+// Projects the runtime schema into the JSON Schema vocabulary tools/list uses,
+// so the advertised constraints can be compared instead of the property names.
+function jsonSchemaFromZod(schema: ZodInternal): Record<string, unknown> {
+  const def = schema._def;
+  switch (def.typeName) {
+    case 'ZodOptional':
+      return jsonSchemaFromZod(def.innerType as ZodInternal);
+    case 'ZodEffects':
+      return jsonSchemaFromZod(def.schema as ZodInternal);
+    case 'ZodDefault':
+      return { ...jsonSchemaFromZod(def.innerType as ZodInternal), default: def.defaultValue?.() };
+    case 'ZodUnion':
+      return { anyOf: (def.options ?? []).map((option) => jsonSchemaFromZod(option)) };
+    case 'ZodArray':
+      return {
+        type: 'array',
+        items: jsonSchemaFromZod(def.type as ZodInternal),
+        ...(def.minLength ? { minItems: def.minLength.value } : {}),
+        ...(def.maxLength ? { maxItems: def.maxLength.value } : {}),
+      };
+    case 'ZodNumber': {
+      const minimum = zodCheck(def, 'min')?.value;
+      const maximum = zodCheck(def, 'max')?.value;
+      return {
+        type: 'number',
+        ...(minimum === undefined ? {} : { minimum }),
+        ...(maximum === undefined ? {} : { maximum }),
+      };
+    }
+    case 'ZodString': {
+      const pattern = zodCheck(def, 'regex')?.regex?.source;
+      const maxLength = zodCheck(def, 'max')?.value;
+      return {
+        type: 'string',
+        ...(pattern === undefined ? {} : { pattern }),
+        ...(maxLength === undefined ? {} : { maxLength }),
+      };
+    }
+    default:
+      throw new Error(`Unsupported Zod type: ${def.typeName}`);
+  }
+}
+
+function withoutDescriptions(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(withoutDescriptions);
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== 'description')
+      .map(([key, entry]) => [key, withoutDescriptions(entry)])
   );
 }
 
@@ -283,64 +418,64 @@ describe('MCP transport', () => {
     expect(body.result.content.at(0)?.text).toContain('Forbidden');
   });
 
-  it('requests timeline activity ending today across ticket and repository events', async () => {
+  it.each([
+    [7, '2026-07-30'],
+    [1, '2026-08-05'],
+  ])('covers %i inclusive calendar days ending today', async (days, expectedFrom) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response('<?xml version="1.0"?><rss><channel></channel></rss>'));
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = stubTimelineFetch(EMPTY_RSS);
 
-    await mcpRequest({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: {
-        name: 'getTimeline',
-        arguments: { days: 7, limit: 20 },
-      },
-    });
+    const result = await callTimeline({ days, limit: 20 });
 
-    const timelineUrl = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
-    expect(Object.fromEntries(timelineUrl.searchParams)).toEqual({
+    // daysback covers the from-day plus N more days, so one day of slack.
+    expect(timelineParams(fetchMock)).toEqual({
       from: '2026-08-05',
-      daysback: '7',
-      max: '21',
+      daysback: days.toString(),
+      max: '500',
       format: 'rss',
       ticket: 'on',
       ticket_details: 'on',
       'repo-': 'on',
     });
+    expect(result).toMatchObject({
+      results: [],
+      returned: 0,
+      requested: { from: expectedFrom, to: '2026-08-05' },
+      covered: { from: expectedFrom, to: '2026-08-05' },
+      complete: true,
+    });
+    expect(result).not.toHaveProperty('continueWith');
+    expect(result.note).toContain("Today's events reflect the time of the request.");
+  });
+
+  it.each([
+    ['to alone', { to: '2026-08-03' }, { from: '2026-07-28', to: '2026-08-03' }],
+    ['from alone', { from: '2026-08-03' }, { from: '2026-08-03', to: '2026-08-05' }],
+  ])('resolves the window from %s', async (_label, args, requested) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));
+    stubTimelineFetch(EMPTY_RSS);
+
+    const result = await callTimeline(args);
+
+    expect(result.requested).toEqual(requested);
   });
 
   it('requests a historical author-filtered timeline window', async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response('<?xml version="1.0"?><rss><channel></channel></rss>'));
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = stubTimelineFetch(EMPTY_RSS);
 
-    const response = await mcpRequest({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: {
-        name: 'getTimeline',
-        arguments: {
-          from: '2005-01-01',
-          to: '2005-01-31',
-          author: ['saxmatt', 'spaced name'],
-          limit: 100,
-        },
-      },
+    const result = await callTimeline({
+      from: '2005-01-01',
+      to: '2005-01-31',
+      author: ['saxmatt', 'spaced name'],
+      limit: 100,
     });
-    const body = (await response.json()) as RpcBody;
-    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
 
-    const timelineUrl = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
-    expect(Object.fromEntries(timelineUrl.searchParams)).toEqual({
+    expect(timelineParams(fetchMock)).toEqual({
       from: '2005-01-31',
-      daysback: '30',
-      max: '101',
+      daysback: '31',
+      max: '500',
       format: 'rss',
       ticket: 'on',
       ticket_details: 'on',
@@ -349,65 +484,154 @@ describe('MCP transport', () => {
     });
     expect(result).toMatchObject({
       results: [],
-      returnedEvents: 0,
-      totalEvents: 0,
-      hasMore: false,
-      nextPage: null,
-      from: '2005-01-01',
-      to: '2005-01-31',
+      returned: 0,
+      requested: { from: '2005-01-01', to: '2005-01-31' },
+      covered: { from: '2005-01-01', to: '2005-01-31' },
+      complete: true,
       authors: ['saxmatt', 'spaced name'],
-      daysBack: 30,
+      note: 'Covered the full requested window 2005-01-01 to 2005-01-31.',
     });
   });
 
-  it('paginates timeline events and reports whether more pages exist', async () => {
-    const rss = `<?xml version="1.0"?><rss><channel>${Array.from(
-      { length: 5 },
-      (_, index) => `<item>
-        <title>Changeset [${2000 + index}]</title>
-        <dc:creator>saxmatt</dc:creator>
-        <pubDate>Mon, 31 Jan 2005 10:0${index}:00 GMT</pubDate>
-        <link>https://core.trac.wordpress.org/changeset/${2000 + index}</link>
-        <description>change ${index}</description>
-      </item>`
-    ).join('')}</channel></rss>`;
-    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(rss));
-    vi.stubGlobal('fetch', fetchMock);
-
-    const callPage = async (page: number) => {
-      const response = await mcpRequest({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'getTimeline',
-          arguments: { from: '2005-01-01', to: '2005-01-31', limit: 2, page },
-        },
-      });
-      return JSON.parse(((await response.json()) as RpcBody).result.content.at(0)?.text ?? '{}');
-    };
-
-    const secondPage = await callPage(2);
-    expect(new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '').searchParams.get('max')).toBe(
-      '5'
+  it('excludes the previous day Trac leaks into a same-day window', async () => {
+    const fetchMock = stubTimelineFetch(
+      timelineRss([
+        ['2005-01-31', 2],
+        ['2005-01-30', 3],
+      ])
     );
-    expect(secondPage.results.map((event: { url: string }) => event.url)).toEqual([
-      'https://core.trac.wordpress.org/changeset/2002',
-      'https://core.trac.wordpress.org/changeset/2003',
-    ]);
-    expect(secondPage).toMatchObject({ returnedEvents: 2, hasMore: true, nextPage: 3, page: 2 });
-    expect(secondPage).not.toHaveProperty('totalEvents');
 
-    const thirdPage = await callPage(3);
-    expect(thirdPage.results.map((event: { url: string }) => event.url)).toEqual([
-      'https://core.trac.wordpress.org/changeset/2004',
-    ]);
-    expect(thirdPage).toMatchObject({
-      returnedEvents: 1,
-      totalEvents: 5,
-      hasMore: false,
-      nextPage: null,
-      page: 3,
+    const result = await callTimeline({ from: '2005-01-31', to: '2005-01-31' });
+
+    // daysback=0 is clamped to 1 upstream, so post-filtering does the trimming.
+    expect(timelineParams(fetchMock)).toMatchObject({ daysback: '1' });
+    expect(resultDays(result)).toEqual(['2005-01-31', '2005-01-31']);
+    expect(result).toMatchObject({
+      returned: 2,
+      covered: { from: '2005-01-31', to: '2005-01-31' },
+      complete: true,
+    });
+  });
+
+  it('drops the half-fetched oldest day when the fetch limit truncates the feed', async () => {
+    stubTimelineFetch(
+      timelineRss([
+        ['2005-01-31', 5],
+        ['2005-01-30', 5],
+        ['2005-01-29', 490],
+      ])
+    );
+
+    const result = await callTimeline({ from: '2005-01-01', to: '2005-01-31', limit: 100 });
+
+    expect(new Set(resultDays(result))).toEqual(new Set(['2005-01-31', '2005-01-30']));
+    expect(result).toMatchObject({
+      returned: 10,
+      requested: { from: '2005-01-01', to: '2005-01-31' },
+      covered: { from: '2005-01-30', to: '2005-01-31' },
+      complete: false,
+      continueWith: { from: '2005-01-01', to: '2005-01-29' },
+    });
+    expect(result.note).toContain(
+      'Call getTimeline again with from 2005-01-01 and to 2005-01-29 for the rest.'
+    );
+  });
+
+  it('reports a complete window when truncation only reaches days before from', async () => {
+    stubTimelineFetch(
+      timelineRss([
+        ['2005-01-31', 5],
+        ['2005-01-30', 5],
+        ['2005-01-29', 490],
+      ])
+    );
+
+    const result = await callTimeline({ from: '2005-01-30', to: '2005-01-31', limit: 100 });
+
+    expect(result).toMatchObject({
+      returned: 10,
+      covered: { from: '2005-01-30', to: '2005-01-31' },
+      complete: true,
+    });
+    expect(result).not.toHaveProperty('continueWith');
+  });
+
+  it('trims whole days from the oldest end to honour the advisory limit', async () => {
+    stubTimelineFetch(
+      timelineRss([
+        ['2005-01-31', 5],
+        ['2005-01-30', 5],
+        ['2005-01-29', 5],
+      ])
+    );
+
+    const result = await callTimeline({ from: '2005-01-29', to: '2005-01-31', limit: 12 });
+
+    expect(new Set(resultDays(result))).toEqual(new Set(['2005-01-31', '2005-01-30']));
+    expect(result).toMatchObject({
+      returned: 10,
+      covered: { from: '2005-01-30', to: '2005-01-31' },
+      complete: false,
+      continueWith: { from: '2005-01-29', to: '2005-01-29' },
+    });
+  });
+
+  it.each([
+    ['a single-day window', '2005-01-31', { from: '2005-01-31', to: '2005-01-31' }],
+    ['the last day left after trimming', '2005-01-29', { from: '2005-01-31', to: '2005-01-31' }],
+  ])('returns %s in full when one day exceeds the limit', async (_label, from, covered) => {
+    stubTimelineFetch(
+      timelineRss([
+        ['2005-01-31', 5],
+        ['2005-01-30', 5],
+        ['2005-01-29', 5],
+      ])
+    );
+
+    const result = await callTimeline({ from, to: '2005-01-31', limit: 2 });
+
+    expect(resultDays(result)).toEqual(Array(5).fill('2005-01-31'));
+    expect(result).toMatchObject({ returned: 5, covered });
+  });
+
+  it('warns when one day alone fills the fetch limit', async () => {
+    stubTimelineFetch(timelineRss([['2005-01-31', 500]]));
+
+    const result = await callTimeline({ from: '2005-01-29', to: '2005-01-31', limit: 100 });
+
+    expect(result).toMatchObject({
+      returned: 500,
+      covered: { from: '2005-01-31', to: '2005-01-31' },
+      complete: false,
+      continueWith: { from: '2005-01-29', to: '2005-01-30' },
+    });
+    expect(result.note).toContain(
+      '2005-01-31 alone filled the 500-event fetch limit, so only its newest events are included and that day is incomplete.'
+    );
+  });
+
+  it('offers no continuation when the only requested day fills the fetch limit', async () => {
+    stubTimelineFetch(timelineRss([['2005-01-31', 500]]));
+
+    const result = await callTimeline({ from: '2005-01-31', to: '2005-01-31', limit: 100 });
+
+    expect(result).toMatchObject({
+      returned: 500,
+      covered: { from: '2005-01-31', to: '2005-01-31' },
+      complete: false,
+    });
+    expect(result).not.toHaveProperty('continueWith');
+  });
+
+  it('accepts calendar dates in years below 1000', async () => {
+    const fetchMock = stubTimelineFetch(EMPTY_RSS);
+
+    const result = await callTimeline({ from: '0099-12-31', to: '0100-01-05' });
+
+    expect(timelineParams(fetchMock)).toMatchObject({ from: '0100-01-05', daysback: '6' });
+    expect(result).toMatchObject({
+      requested: { from: '0099-12-31', to: '0100-01-05' },
+      complete: true,
     });
   });
 
@@ -418,6 +642,7 @@ describe('MCP transport', () => {
       'days cannot be combined with from or to',
     ],
     ['an impossible calendar date', { from: '2005-02-31' }, 'not a valid calendar date'],
+    ['an end date in the future', { to: '2999-01-01' }, 'to must not be later than today'],
     [
       'an inverted date range',
       { from: '2005-03-01', to: '2005-01-01' },
@@ -429,11 +654,9 @@ describe('MCP transport', () => {
       'at most 90 days',
     ],
     ['an author using Trac exclusion syntax', { author: '-saxmatt' }, 'Authors must be'],
-    [
-      'pagination deeper than the event cap',
-      { limit: 100, page: 11 },
-      'may not exceed 1000 events',
-    ],
+    ['an author with a trailing space', { author: 'saxmatt ' }, 'Authors must be'],
+    ['an author with a doubled space', { author: 'spaced  name' }, 'Authors must be'],
+    ['an empty author list', { author: [] }, 'at least 1 element'],
   ])('rejects %s before an upstream request', async (_label, args, message) => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);
@@ -451,23 +674,22 @@ describe('MCP transport', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('advertises the extended getTimeline arguments', async () => {
+  it('advertises the getTimeline constraints its runtime schema enforces', async () => {
     const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const body = (await response.json()) as {
       result: {
         tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }>;
       };
     };
+    const advertised = body.result.tools.find((tool) => tool.name === 'getTimeline')?.inputSchema
+      .properties;
+    const shape = (GetTimelineArgsSchema as unknown as ZodInternal)._def.schema?._def.shape?.();
 
-    const timelineTool = body.result.tools.find((tool) => tool.name === 'getTimeline');
-    expect(Object.keys(timelineTool?.inputSchema.properties ?? {}).sort()).toEqual([
-      'author',
-      'days',
-      'from',
-      'limit',
-      'page',
-      'to',
-    ]);
+    expect(withoutDescriptions(advertised)).toEqual(
+      Object.fromEntries(
+        Object.entries(shape ?? {}).map(([name, member]) => [name, jsonSchemaFromZod(member)])
+      )
+    );
   });
 
   it('includes linked pull request status, checks, reviews, and changes with a ticket', async () => {
