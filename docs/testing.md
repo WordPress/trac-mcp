@@ -36,6 +36,7 @@ Start the Worker by following [local-development.md](local-development.md), then
 5. Check search page 1 and a page beyond the final result; the latter should return an empty page.
 6. Initialize `/mcp/chatgpt`, then search a keyword, ticket `65739`, and changeset `r58504`.
 7. Send invalid arguments and confirm the response is a JSON-RPC invalid-params error.
+8. Request ticket `99999999` and changeset `99999999`; confirm each returns a tool error whose payload carries `"code": "not_found"` with the resource and ID named. Search with an unsupported filter field and confirm `"code": "invalid_argument"`.
 
 Do not paste private ticket data or credentials into fixtures. If live checks fail, distinguish a Trac response change from Worker behavior before changing a parser.
 

@@ -78,6 +78,28 @@ const LinkedPullRequestSchema = z.object({
 
 class UnknownToolError extends Error {}
 
+// Stable, machine-readable tool error codes. These are API surface documented in the README:
+// consumers branch on them, so codes only change with a version bump. Messages can change freely.
+type ToolErrorCode = 'not_found' | 'invalid_argument' | 'rate_limited' | 'upstream_error';
+
+class ToolError extends Error {
+  readonly code: ToolErrorCode;
+  readonly details: { resource?: 'ticket' | 'changeset'; id?: number };
+
+  constructor(code: ToolErrorCode, message: string, details: ToolError['details'] = {}) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function upstreamHttpError(
+  response: Response,
+  message = `HTTP ${response.status}: ${response.statusText}`
+): ToolError {
+  return new ToolError(response.status === 429 ? 'rate_limited' : 'upstream_error', message);
+}
+
 const TRAC_USER_AGENT = 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)';
 const TRAC_ORIGIN = 'https://core.trac.wordpress.org';
 const TRAC_RETRY_DELAYS_MS = [2000, 4000, 8000] as const;
@@ -456,7 +478,7 @@ function addColumns(url: URL, columns: readonly string[]): void {
 export function parseTicketFilter(expression: string): [string, string] {
   const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
-    throw new Error(`Invalid ticket filter expression: ${expression}`);
+    throw new ToolError('invalid_argument', `Invalid ticket filter expression: ${expression}`);
   }
 
   const field = match[1].toLowerCase();
@@ -464,7 +486,7 @@ export function parseTicketFilter(expression: string): [string, string] {
     !TICKET_COLUMNS.includes(field as (typeof TICKET_COLUMNS)[number]) &&
     field !== 'description'
   ) {
-    throw new Error(`Unsupported ticket filter: ${field}`);
+    throw new ToolError('invalid_argument', `Unsupported ticket filter: ${field}`);
   }
 
   return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
@@ -503,12 +525,12 @@ async function fetchCsvRecords(url: URL): Promise<TracRecord[]> {
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    throw upstreamHttpError(response);
   }
 
   const csvData = await response.text();
   if (/<!doctype html|<html/i.test(csvData)) {
-    throw new Error('Trac returned HTML instead of CSV');
+    throw new ToolError('upstream_error', 'Trac returned HTML instead of CSV');
   }
 
   return parseCsvRecords(csvData);
@@ -627,7 +649,7 @@ export async function searchTracTickets(
   const totalHtml = await totalResponse.text();
   const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
   if (!totalMatch?.[1]) {
-    throw new Error('Trac did not return the total ticket count');
+    throw new ToolError('upstream_error', 'Trac did not return the total ticket count');
   }
 
   const totalFound = Number.parseInt(totalMatch[1].replace(/,/g, ''), 10);
@@ -658,8 +680,14 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   ]);
 
   const record = records.find((candidate) => Number.parseInt(candidate.id ?? '', 10) === ticketId);
-  if (!record || !rssResponse.ok) {
-    throw new Error(`Ticket ${ticketId} not found`);
+  if (!record || rssResponse.status === 404) {
+    throw new ToolError('not_found', `Ticket ${ticketId} not found`, {
+      resource: 'ticket',
+      id: ticketId,
+    });
+  }
+  if (!rssResponse.ok) {
+    throw upstreamHttpError(rssResponse);
   }
 
   const rssText = await rssResponse.text();
@@ -782,6 +810,16 @@ ${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText
   };
 }
 
+function changesetFetchError(revision: number, response: Response): ToolError {
+  if (response.status === 404) {
+    return new ToolError('not_found', `Changeset ${revision} not found`, {
+      resource: 'changeset',
+      id: revision,
+    });
+  }
+  return upstreamHttpError(response);
+}
+
 async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit = 2000) {
   const changesetUrl = `https://core.trac.wordpress.org/changeset/${revision}`;
   const response = await fetchTrac(changesetUrl, {
@@ -789,7 +827,7 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
   });
 
   if (!response.ok) {
-    throw new Error(`Changeset ${revision} not found`);
+    throw changesetFetchError(revision, response);
   }
 
   const html = await response.text();
@@ -864,7 +902,7 @@ async function fetchTracFieldOptions(field: 'component' | 'severity'): Promise<s
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    throw upstreamHttpError(response);
   }
 
   const html = await response.text();
@@ -872,7 +910,7 @@ async function fetchTracFieldOptions(field: 'component' | 'severity'): Promise<s
     new RegExp(`<select\\s+name="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
   )?.[1];
   if (!select) {
-    throw new Error(`Trac did not return ${field} options`);
+    throw new ToolError('upstream_error', `Trac did not return ${field} options`);
   }
 
   return Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
@@ -925,7 +963,7 @@ async function fetchTimeline(days: number, limit: number) {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
   if (!response.ok) {
-    throw new Error(`Failed to fetch timeline: ${response.statusText}`);
+    throw upstreamHttpError(response, `Failed to fetch timeline: ${response.statusText}`);
   }
 
   return parseRssItems(await response.text()).map((item, index) => ({
@@ -958,6 +996,16 @@ function toolResult(id: JsonRpcRequest['id'], result: unknown, isError = false) 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error';
+}
+
+function toolErrorResult(id: JsonRpcRequest['id'], error: unknown) {
+  const toolError =
+    error instanceof ToolError ? error : new ToolError('upstream_error', errorMessage(error));
+  return toolResult(
+    id,
+    { code: toolError.code, error: toolError.message, ...toolError.details },
+    true
+  );
 }
 
 async function executeStandardTool(name: string, input: unknown): Promise<unknown> {
@@ -1219,7 +1267,7 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
         if (error instanceof UnknownToolError || error instanceof z.ZodError) {
           return jsonRpcError(id, -32602, errorMessage(error));
         }
-        return toolResult(id, { error: errorMessage(error) }, true);
+        return toolErrorResult(id, error);
       }
     }
 
@@ -1314,7 +1362,7 @@ Query Types:
         if (error instanceof UnknownToolError || error instanceof z.ZodError) {
           return jsonRpcError(id, -32602, errorMessage(error));
         }
-        return toolResult(id, { error: errorMessage(error) }, true);
+        return toolErrorResult(id, error);
       }
     }
 
