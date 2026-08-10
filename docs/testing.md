@@ -32,6 +32,7 @@ Start the Worker by following [local-development.md](local-development.md), then
    - Read ticket `62358`; confirm linked pull request data remains available with no checks and changesets are separate from comments.
    - Read changeset `58504` with and without its diff.
    - Read seven days of timeline activity. A short window can legitimately be empty, so judge this on the request succeeding rather than on the count.
+   - Read a historical timeline range filtered to one author, using a range from January 2005 so the result cannot come from recent activity, and page through it. Every event should carry that author, page 2 should not repeat page 1, and the last page should report `hasMore` as `false`.
    - List components and milestones.
 5. Check search page 1 and a page beyond the final result; the latter should return an empty page.
 6. Initialize `/mcp/chatgpt`, then search a keyword, ticket `65739`, and changeset `r58504`.

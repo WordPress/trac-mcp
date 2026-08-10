@@ -35,7 +35,7 @@ Argument names are easy to guess wrong. The real ones:
 | `searchTickets` | none | `query`, `limit`, `page`, `status`, `component`, `milestone`, `resolution` |
 | `getTicket` | `id` | `includeComments`, `commentLimit` |
 | `getChangeset` | `revision` | `includeDiff`, `diffLimit` |
-| `getTimeline` | none | `days`, `limit` |
+| `getTimeline` | none | `days`, `limit`, `from`, `to`, `author`, `page` |
 | `getTracInfo` | `type` | none |
 
 `getTicket` takes `id`, not `ticketId`. `getTracInfo` takes `type`, not `infoType`. `getChangeset` takes `revision`, not `rev`.
@@ -86,6 +86,8 @@ call /mcp getTicket '{"id":62358}'
 call /mcp getChangeset '{"revision":58504,"includeDiff":false}'
 call /mcp getChangeset '{"revision":58504,"includeDiff":true,"diffLimit":500}'
 call /mcp getTimeline '{"days":7,"limit":5}'
+call /mcp getTimeline '{"from":"2005-01-01","to":"2005-01-31","author":"saxmatt","limit":5}'
+call /mcp getTimeline '{"from":"2005-01-01","to":"2005-01-31","author":"saxmatt","limit":5,"page":2}'
 call /mcp getTracInfo '{"type":"components"}'
 call /mcp getTracInfo '{"type":"milestones"}'
 ```
@@ -98,6 +100,7 @@ What to look for:
 - Tickets `65808`, `65793`, and `62358` each carry `metadata.linkedPullRequests`. `65793` also carries `metadata.attachments`, and `62358` also carries `metadata.changesets`, neither of them folded into the comment list.
 - `getChangeset` returns the revision, author, date, message, and file list. With `includeDiff`, the text includes diff hunks and respects `diffLimit`.
 - `getTimeline` returns recent events, and `getTracInfo` returns the requested vocabulary. A seven day window is used because a quiet day can legitimately produce no events. An empty list is a valid answer for any short window, so judge this check on the request succeeding rather than on the count.
+- The historical `getTimeline` calls prove the server answers from the requested range rather than from recent activity: every event carries `saxmatt` as `metadata.author` with a January 2005 date, page 1 reports `hasMore: true` with `nextPage: 2`, and page 2 returns different events than page 1. January 2005 is immutable history, so these two calls should never legitimately come back empty.
 
 ## 4. Pagination
 
@@ -127,6 +130,7 @@ rpc  /mcp '{"jsonrpc":"2.0","id":1,"method":"nope/nope"}'
 call /mcp doesNotExist '{}'
 call /mcp getTicket '{"id":"not-a-number"}'
 call /mcp getChangeset '{"revision":-1}'
+call /mcp getTimeline '{"days":7,"from":"2005-01-01"}'
 call /mcp getTracInfo '{}'
 ```
 

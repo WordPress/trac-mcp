@@ -32,10 +32,90 @@ const GetChangesetArgsSchema = z.object({
   includeDiff: z.boolean().default(true),
   diffLimit: z.number().int().min(0).max(10000).default(2000),
 });
-const GetTimelineArgsSchema = z.object({
-  days: z.number().int().min(1).max(30).default(7),
-  limit: z.number().int().min(1).max(100).default(20),
-});
+// core.trac.wordpress.org clamps the timeline's daysback parameter at Trac's
+// default max_daysback of 90; wider requests silently lose the oldest events.
+const TIMELINE_MAX_WINDOW_DAYS = 90;
+const TIMELINE_MAX_EVENT_OFFSET = 1000;
+const DAY_IN_MS = 86_400_000;
+
+function timelineDayTimestamp(value: string): number {
+  const [year = 0, month = 0, day = 0] = value.split('-').map(Number);
+  const timestamp = Date.UTC(year, month - 1, day);
+  const date = new Date(timestamp);
+  // Date.UTC rolls impossible dates such as 2005-02-31 over into the next
+  // month, so only a component roundtrip proves the date was real.
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+    ? timestamp
+    : Number.NaN;
+}
+
+const TimelineDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Dates must be ISO-8601 (YYYY-MM-DD)');
+// A leading alphanumeric keeps user input from reaching Trac's `-author`
+// exclusion syntax; the quote-free charset makes quoting spaced names safe.
+const TimelineAuthorSchema = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9 @._-]{0,49}$/i,
+    'Authors must be Trac usernames: letters or numbers, then letters, numbers, spaces, or @._-'
+  );
+const GetTimelineArgsSchema = z
+  .object({
+    days: z.number().int().min(1).max(30).optional(),
+    limit: z.number().int().min(1).max(100).default(20),
+    page: z.number().int().min(1).default(1),
+    from: TimelineDateSchema.optional(),
+    to: TimelineDateSchema.optional(),
+    author: z
+      .union([TimelineAuthorSchema, z.array(TimelineAuthorSchema).min(1).max(10)])
+      .optional(),
+  })
+  .superRefine((args, ctx) => {
+    if (args.days !== undefined && (args.from !== undefined || args.to !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'days cannot be combined with from or to; use from and to for historical ranges',
+      });
+      return;
+    }
+    for (const [label, value] of [
+      ['from', args.from],
+      ['to', args.to],
+    ] as const) {
+      if (value !== undefined && Number.isNaN(timelineDayTimestamp(value))) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${label} is not a valid calendar date: ${value}`,
+        });
+        return;
+      }
+    }
+    if (args.from !== undefined) {
+      const endDate = args.to ?? new Date().toISOString().slice(0, 10);
+      const windowDays =
+        (timelineDayTimestamp(endDate) - timelineDayTimestamp(args.from)) / DAY_IN_MS;
+      if (windowDays < 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'from must not be later than to',
+        });
+      } else if (windowDays > TIMELINE_MAX_WINDOW_DAYS) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `The from-to window may span at most ${TIMELINE_MAX_WINDOW_DAYS} days per request; query adjacent ranges for longer periods`,
+        });
+      }
+    }
+    if (args.page * args.limit > TIMELINE_MAX_EVENT_OFFSET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `page times limit may not exceed ${TIMELINE_MAX_EVENT_OFFSET} events; narrow the date range instead`,
+      });
+    }
+  });
 const GetTracInfoArgsSchema = z.object({
   type: z.enum(['components', 'milestones', 'priorities', 'severities', 'types', 'statuses']),
 });
@@ -911,15 +991,44 @@ async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
   return Array.from(new Set(values)).sort();
 }
 
-async function fetchTimeline(days: number, limit: number) {
+type TimelineQuery = ReturnType<typeof resolveTimelineQuery>;
+
+function resolveTimelineQuery(args: z.infer<typeof GetTimelineArgsSchema>) {
+  const today = new Date().toISOString().slice(0, 10);
+  const endDate = args.to ?? today;
+  const endTimestamp = timelineDayTimestamp(endDate);
+  const daysBack =
+    args.from !== undefined
+      ? Math.round((endTimestamp - timelineDayTimestamp(args.from)) / DAY_IN_MS)
+      : (args.days ?? 7);
+
+  return {
+    endDate,
+    startDate: new Date(endTimestamp - daysBack * DAY_IN_MS).toISOString().slice(0, 10),
+    daysBack,
+    authors: typeof args.author === 'string' ? [args.author] : (args.author ?? []),
+    limit: args.limit,
+    page: args.page,
+  };
+}
+
+async function fetchTimeline({ endDate, daysBack, authors, limit, page }: TimelineQuery) {
   const timelineUrl = new URL('https://core.trac.wordpress.org/timeline');
-  timelineUrl.searchParams.set('from', new Date().toISOString().slice(0, 10));
-  timelineUrl.searchParams.set('daysback', days.toString());
-  timelineUrl.searchParams.set('max', limit.toString());
+  timelineUrl.searchParams.set('from', endDate);
+  timelineUrl.searchParams.set('daysback', daysBack.toString());
+  // Fetch one event past the requested page so hasMore is exact.
+  timelineUrl.searchParams.set('max', (page * limit + 1).toString());
   timelineUrl.searchParams.set('format', 'rss');
   timelineUrl.searchParams.set('ticket', 'on');
   timelineUrl.searchParams.set('ticket_details', 'on');
   timelineUrl.searchParams.set('repo-', 'on');
+  if (authors.length > 0) {
+    // Trac splits the authors filter on spaces unless the name is quoted.
+    timelineUrl.searchParams.set(
+      'authors',
+      authors.map((name) => (name.includes(' ') ? `"${name}"` : name)).join(' ')
+    );
+  }
 
   const response = await fetchTrac(timelineUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
@@ -928,7 +1037,9 @@ async function fetchTimeline(days: number, limit: number) {
     throw new Error(`Failed to fetch timeline: ${response.statusText}`);
   }
 
-  return parseRssItems(await response.text()).map((item, index) => ({
+  const items = parseRssItems(await response.text());
+  const hasMore = items.length > page * limit;
+  const events = items.slice((page - 1) * limit, page * limit).map((item, index) => ({
     id: item.link || `event-${index}`,
     title: item.title || 'Unknown Event',
     text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
@@ -939,6 +1050,12 @@ async function fetchTimeline(days: number, limit: number) {
       description: item.description,
     },
   }));
+
+  return {
+    events,
+    hasMore,
+    totalEvents: hasMore ? null : items.length,
+  };
 }
 
 function jsonRpcResult(id: JsonRpcRequest['id'], result: unknown) {
@@ -1009,12 +1126,20 @@ async function executeStandardTool(name: string, input: unknown): Promise<unknow
     }
 
     case 'getTimeline': {
-      const { days, limit } = GetTimelineArgsSchema.parse(input ?? {});
-      const events = await fetchTimeline(days, limit);
+      const query = resolveTimelineQuery(GetTimelineArgsSchema.parse(input ?? {}));
+      const { events, hasMore, totalEvents } = await fetchTimeline(query);
       return {
         results: events,
-        totalEvents: events.length,
-        daysBack: days,
+        returnedEvents: events.length,
+        ...(totalEvents === null ? {} : { totalEvents }),
+        hasMore,
+        nextPage: hasMore ? query.page + 1 : null,
+        page: query.page,
+        pageSize: query.limit,
+        from: query.startDate,
+        to: query.endDate,
+        ...(query.authors.length > 0 ? { authors: query.authors } : {}),
+        daysBack: query.daysBack,
         timelineUrl: 'https://core.trac.wordpress.org/timeline',
       };
     }
@@ -1160,19 +1285,44 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
             {
               name: 'getTimeline',
               description:
-                'Get recent activity from WordPress Trac timeline including recent tickets, commits, and other events.',
+                'Get activity from the WordPress Trac timeline including tickets, commits, and other events. Supports recent activity (days), arbitrary historical date ranges (from/to, at most 90 days per request), server-side author filtering, and page-based pagination. Responses report returnedEvents, hasMore, and nextPage; totalEvents is included once the window is fully enumerated.',
               inputSchema: {
                 type: 'object',
                 properties: {
                   days: {
                     type: 'number',
-                    description: 'Number of days to look back (default: 7, max: 30)',
+                    description:
+                      'Number of days to look back from today (default: 7, max: 30). Cannot be combined with from or to.',
                     default: 7,
+                  },
+                  from: {
+                    type: 'string',
+                    description:
+                      'Inclusive ISO-8601 start date (YYYY-MM-DD) for a historical range. The from-to window may span at most 90 days per request; query adjacent ranges for longer periods.',
+                  },
+                  to: {
+                    type: 'string',
+                    description:
+                      'Inclusive ISO-8601 end date (YYYY-MM-DD). Defaults to today when only from is given; to alone covers the 7 days ending at to.',
+                  },
+                  author: {
+                    description:
+                      'Trac username, or list of up to 10 usernames, to filter events by author. Filtering happens on the server, so results stay complete even when the unfiltered window holds more events than limit.',
+                    anyOf: [
+                      { type: 'string' },
+                      { type: 'array', items: { type: 'string' }, maxItems: 10 },
+                    ],
                   },
                   limit: {
                     type: 'number',
-                    description: 'Maximum number of events to return (default: 20, max: 100)',
+                    description: 'Maximum number of events per page (default: 20, max: 100)',
                     default: 20,
+                  },
+                  page: {
+                    type: 'number',
+                    description:
+                      'One-based results page (default: 1). page times limit may not exceed 1000. Follow nextPage while hasMore is true to paginate without gaps or duplicates.',
+                    default: 1,
                   },
                 },
               },
@@ -1348,7 +1498,10 @@ async function getChangesetForChatGPT(revision: number, includeDiff: boolean) {
 }
 
 async function getTimelineForChatGPT(days: number, limit: number) {
-  return { results: await fetchTimeline(days, limit) };
+  const { events } = await fetchTimeline(
+    resolveTimelineQuery(GetTimelineArgsSchema.parse({ days, limit }))
+  );
+  return { results: events };
 }
 
 async function runChatGptSearch(query: string) {

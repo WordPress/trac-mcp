@@ -305,12 +305,169 @@ describe('MCP transport', () => {
     expect(Object.fromEntries(timelineUrl.searchParams)).toEqual({
       from: '2026-08-05',
       daysback: '7',
-      max: '20',
+      max: '21',
       format: 'rss',
       ticket: 'on',
       ticket_details: 'on',
       'repo-': 'on',
     });
+  });
+
+  it('requests a historical author-filtered timeline window', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('<?xml version="1.0"?><rss><channel></channel></rss>'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTimeline',
+        arguments: {
+          from: '2005-01-01',
+          to: '2005-01-31',
+          author: ['saxmatt', 'spaced name'],
+          limit: 100,
+        },
+      },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    const timelineUrl = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(Object.fromEntries(timelineUrl.searchParams)).toEqual({
+      from: '2005-01-31',
+      daysback: '30',
+      max: '101',
+      format: 'rss',
+      ticket: 'on',
+      ticket_details: 'on',
+      'repo-': 'on',
+      authors: 'saxmatt "spaced name"',
+    });
+    expect(result).toMatchObject({
+      results: [],
+      returnedEvents: 0,
+      totalEvents: 0,
+      hasMore: false,
+      nextPage: null,
+      from: '2005-01-01',
+      to: '2005-01-31',
+      authors: ['saxmatt', 'spaced name'],
+      daysBack: 30,
+    });
+  });
+
+  it('paginates timeline events and reports whether more pages exist', async () => {
+    const rss = `<?xml version="1.0"?><rss><channel>${Array.from(
+      { length: 5 },
+      (_, index) => `<item>
+        <title>Changeset [${2000 + index}]</title>
+        <dc:creator>saxmatt</dc:creator>
+        <pubDate>Mon, 31 Jan 2005 10:0${index}:00 GMT</pubDate>
+        <link>https://core.trac.wordpress.org/changeset/${2000 + index}</link>
+        <description>change ${index}</description>
+      </item>`
+    ).join('')}</channel></rss>`;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(rss));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const callPage = async (page: number) => {
+      const response = await mcpRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'getTimeline',
+          arguments: { from: '2005-01-01', to: '2005-01-31', limit: 2, page },
+        },
+      });
+      return JSON.parse(((await response.json()) as RpcBody).result.content.at(0)?.text ?? '{}');
+    };
+
+    const secondPage = await callPage(2);
+    expect(new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '').searchParams.get('max')).toBe(
+      '5'
+    );
+    expect(secondPage.results.map((event: { url: string }) => event.url)).toEqual([
+      'https://core.trac.wordpress.org/changeset/2002',
+      'https://core.trac.wordpress.org/changeset/2003',
+    ]);
+    expect(secondPage).toMatchObject({ returnedEvents: 2, hasMore: true, nextPage: 3, page: 2 });
+    expect(secondPage).not.toHaveProperty('totalEvents');
+
+    const thirdPage = await callPage(3);
+    expect(thirdPage.results.map((event: { url: string }) => event.url)).toEqual([
+      'https://core.trac.wordpress.org/changeset/2004',
+    ]);
+    expect(thirdPage).toMatchObject({
+      returnedEvents: 1,
+      totalEvents: 5,
+      hasMore: false,
+      nextPage: null,
+      page: 3,
+    });
+  });
+
+  it.each([
+    [
+      'days combined with a date range',
+      { days: 7, from: '2005-01-01' },
+      'days cannot be combined with from or to',
+    ],
+    ['an impossible calendar date', { from: '2005-02-31' }, 'not a valid calendar date'],
+    [
+      'an inverted date range',
+      { from: '2005-03-01', to: '2005-01-01' },
+      'from must not be later than to',
+    ],
+    [
+      'a window wider than Trac can serve',
+      { from: '2005-01-01', to: '2005-06-01' },
+      'at most 90 days',
+    ],
+    ['an author using Trac exclusion syntax', { author: '-saxmatt' }, 'Authors must be'],
+    [
+      'pagination deeper than the event cap',
+      { limit: 100, page: 11 },
+      'may not exceed 1000 events',
+    ],
+  ])('rejects %s before an upstream request', async (_label, args, message) => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTimeline', arguments: args },
+    });
+    const body = (await response.json()) as RpcBody & { error: { message: string } };
+
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toContain(message);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('advertises the extended getTimeline arguments', async () => {
+    const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const body = (await response.json()) as {
+      result: {
+        tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }>;
+      };
+    };
+
+    const timelineTool = body.result.tools.find((tool) => tool.name === 'getTimeline');
+    expect(Object.keys(timelineTool?.inputSchema.properties ?? {}).sort()).toEqual([
+      'author',
+      'days',
+      'from',
+      'limit',
+      'page',
+      'to',
+    ]);
   });
 
   it('includes linked pull request status, checks, reviews, and changes with a ticket', async () => {
