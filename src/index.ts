@@ -88,6 +88,7 @@ class ToolError extends Error {
 
   constructor(code: ToolErrorCode, message: string, details: ToolError['details'] = {}) {
     super(message);
+    this.name = 'ToolError';
     this.code = code;
     this.details = details;
   }
