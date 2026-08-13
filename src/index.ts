@@ -681,7 +681,7 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   ]);
 
   const record = records.find((candidate) => Number.parseInt(candidate.id ?? '', 10) === ticketId);
-  if (!record || rssResponse.status === 404) {
+  if (rssResponse.status === 404) {
     throw new ToolError('not_found', `Ticket ${ticketId} not found`, {
       resource: 'ticket',
       id: ticketId,
@@ -689,6 +689,9 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   }
   if (!rssResponse.ok) {
     throw upstreamHttpError(rssResponse);
+  }
+  if (!record) {
+    throw new ToolError('upstream_error', `Trac returned inconsistent data for ticket ${ticketId}`);
   }
 
   const rssText = await rssResponse.text();

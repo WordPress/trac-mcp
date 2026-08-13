@@ -538,6 +538,35 @@ describe('MCP transport', () => {
     });
   });
 
+  it('reports an upstream error when ticket CSV data is absent but history exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+          )
+        )
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 99999999 } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'Trac returned inconsistent data for ticket 99999999',
+    });
+  });
+
   it('reports an upstream error, not a missing ticket, when the history fetch fails', async () => {
     vi.stubGlobal(
       'fetch',
