@@ -18,7 +18,7 @@ The unit of coverage is the UTC calendar day, which is the only unit the upstrea
 
 - A request names a window, as `days` or as `from`/`to`. The response echoes it as `requested`.
 - `covered` is the sub-window the response covers completely. It is always whole days.
-- `complete` is true when `covered` equals `requested` and every day in it was seen whole. When it is false, `continueWith` holds the `from`/`to` of the uncovered remainder, in the same vocabulary the request used.
+- `complete` is true when `covered` equals `requested` and every day in it was seen whole. When it is false, `continueWith` holds the `from`/`to` of the uncovered remainder together with the effective `limit` and accepted `author` input, so it can be submitted unchanged.
 - The server makes one upstream fetch per request, capped at 500 events, filters the events into `requested` by UTC date, and, if that fetch came back truncated, drops the oldest day because it may be partial. Every day it reports is a day it saw whole.
 - `limit` is advisory. Results round down to a day boundary and the newest day is returned in full, so a response can hold more events than `limit` asked for.
 - `note` states the coverage in plain language.
@@ -41,6 +41,6 @@ Rejected. Truncation happens at an event, but seeking happens at a day. A cursor
 
 - Walking a window produces no gaps and no duplicates, by construction.
 - One upstream request per client request, sized by the fetch cap rather than by how far into the range the caller has already walked. Total upstream work over a walked range is linear in the range instead of quadratic in the number of pages.
-- Continuation speaks the tool's own input vocabulary. A client can resume from a logged `from`/`to` pair with no server state and no cursor to expire, and a person can read the next request.
+- Continuation speaks the tool's own input vocabulary and preserves the filters that define the query. A client can submit it unchanged, with no server state and no cursor to expire, and a person can read the next request.
 - Sub-day resumption is given up. A client that wants fewer events than one day holds still receives that whole day. At core.trac's density the overshoot is small.
 - Callers that only want the newest activity do not have to know any of this: a bare call still answers for the last seven days in one request.

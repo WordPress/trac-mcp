@@ -1004,6 +1004,10 @@ async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
 }
 
 type TimelineWindow = { from: string; to: string };
+type TimelineContinuation = TimelineWindow & {
+  author?: z.infer<typeof TimelineAuthorSchema> | z.infer<typeof TimelineAuthorSchema>[];
+  limit: number;
+};
 type TimelineQuery = ReturnType<typeof resolveTimelineQuery>;
 
 // `today` is read once per request and threaded through: resolving the window
@@ -1031,6 +1035,7 @@ function resolveTimelineQuery(args: z.infer<typeof GetTimelineArgsSchema>, today
   return {
     requested: { from, to } satisfies TimelineWindow,
     today,
+    author: args.author,
     authors: typeof args.author === 'string' ? [args.author] : (args.author ?? []),
     limit: args.limit,
   };
@@ -1071,7 +1076,7 @@ function timelineNote(
 }
 
 function buildTimelineResult(rawItems: RssItem[], query: TimelineQuery) {
-  const { requested, today, authors, limit } = query;
+  const { requested, today, author, authors, limit } = query;
   const truncated = rawItems.length >= TIMELINE_FETCH_MAX;
   const dated = rawItems
     .map((item) => ({ item, day: timelineEventDay(item.date) }))
@@ -1106,9 +1111,14 @@ function buildTimelineResult(rawItems: RssItem[], query: TimelineQuery) {
   }
 
   const covered: TimelineWindow = { from: coveredFrom, to: requested.to };
-  const continueWith =
+  const continueWith: TimelineContinuation | undefined =
     covered.from > requested.from
-      ? { from: requested.from, to: shiftTimelineDay(covered.from, -1) }
+      ? {
+          from: requested.from,
+          to: shiftTimelineDay(covered.from, -1),
+          ...(author === undefined ? {} : { author }),
+          limit,
+        }
       : undefined;
 
   return {

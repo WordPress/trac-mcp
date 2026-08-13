@@ -87,11 +87,12 @@ holds more events than `limit`.
 
 Each response lists events newest first in `results` and reports `requested`, the window that was
 asked for, and `covered`, the part of it this response covers completely. `complete` says whether
-the response covered all of it. When it is `false`, `continueWith` carries a ready-made `from`/`to`
-for the remainder: send it back to `getTimeline` and repeat until a response reports `complete` as
-`true`, or until a response arrives without a `continueWith`. A continuation window always ends on
-a day already past, so walking one cannot produce gaps or duplicates. `note` states the coverage in
-plain language, and coverage that includes today is accurate as of the request.
+the response covered all of it. When it is `false`, `continueWith` is a ready-made arguments object
+for the remainder: it preserves the effective `limit` and the accepted `author` input when present,
+so send it back to `getTimeline` unchanged and repeat until a response reports `complete` as `true`,
+or until a response arrives without a `continueWith`. A continuation window always ends on a day
+already past, so walking one cannot produce gaps or duplicates. `note` states the coverage in plain
+language, and coverage that includes today is accurate as of the request.
 
 [docs/timeline-pagination.md](docs/timeline-pagination.md) records why the timeline reports day
 coverage instead of page numbers.

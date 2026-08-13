@@ -101,7 +101,7 @@ What to look for:
 - `getChangeset` returns the revision, author, date, message, and file list. With `includeDiff`, the text includes diff hunks and respects `diffLimit`.
 - `getTimeline` returns recent events, and `getTracInfo` returns the requested vocabulary. A seven day window is used because a quiet day can legitimately produce no events. An empty list is a valid answer for any short window, so judge this check on the request succeeding rather than on the count.
 - The historical `getTimeline` call proves the server answers from the requested range rather than from recent activity: every event carries `saxmatt` as `metadata.author` with a January 2005 date. January 2005 is immutable history, so this call should never legitimately come back empty.
-- That same call shows the coverage envelope. `requested` is the window that was asked for, `covered` is a whole-day window inside it, `complete` is `false` because the month holds more events than `limit`, and `continueWith.to` is the day before `covered.from`. `returned` counts the events in `results`, `authors` lists `saxmatt`, and `note` describes the coverage in words. No `page`, `pageSize`, `hasMore`, `nextPage`, `totalEvents`, `returnedEvents`, or `daysBack` field should appear.
+- That same call shows the coverage envelope. `requested` is the window that was asked for, `covered` is a whole-day window inside it, `complete` is `false` because the month holds more events than `limit`, and `continueWith.to` is the day before `covered.from`. `continueWith` also preserves `author` as `saxmatt` and `limit` as `20`, so it is the complete next request. `returned` counts the events in `results`, `authors` lists `saxmatt`, and `note` describes the coverage in words. No `page`, `pageSize`, `hasMore`, `nextPage`, `totalEvents`, `returnedEvents`, or `daysBack` field should appear.
 
 ## 4. Timeline coverage walk
 
@@ -117,7 +117,7 @@ import json, sys
 d = json.load(sys.stdin); r, c, n = d['requested'], d['covered'], d.get('continueWith')
 print(d['returned'])
 print(f\"requested {r['from']}..{r['to']}  covered {c['from']}..{c['to']}  returned {d['returned']}  complete {d['complete']}\")
-print(json.dumps(dict(n, author=d['authors'], limit=$lim)) if n else '')")
+print(json.dumps(n) if n else '')")
     [ -n "$returned" ] || { echo 'walk stopped: response was not a timeline result'; return 1; }
     total=$((total + returned)); steps=$((steps + 1)); echo "$line"; args="$next"
   done
@@ -128,7 +128,7 @@ walk_timeline      # limit 20
 walk_timeline 5    # smaller windows, more steps, same events
 ```
 
-The helper sends nothing of its own after the first call: each later request is the `continueWith` object the server returned, with the author filter it echoed back in `authors` and the same `limit`.
+The helper sends nothing of its own after the first call: each later request is exactly the `continueWith` object the server returned, including its `author` filter and effective `limit`.
 
 What to look for:
 

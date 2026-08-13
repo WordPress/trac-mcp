@@ -20,13 +20,17 @@ type RpcBody = {
 };
 
 type TimelineWindow = { from: string; to: string };
+type TimelineContinuation = TimelineWindow & {
+  author?: string | string[];
+  limit: number;
+};
 type TimelineResult = {
   results: Array<{ url: string; metadata: { date: string; author: string } }>;
   returned: number;
   requested: TimelineWindow;
   covered: TimelineWindow;
   complete: boolean;
-  continueWith?: TimelineWindow;
+  continueWith?: TimelineContinuation;
   authors?: string[];
   note: string;
 };
@@ -530,7 +534,7 @@ describe('MCP transport', () => {
       requested: { from: '2005-01-01', to: '2005-01-31' },
       covered: { from: '2005-01-30', to: '2005-01-31' },
       complete: false,
-      continueWith: { from: '2005-01-01', to: '2005-01-29' },
+      continueWith: { from: '2005-01-01', to: '2005-01-29', limit: 100 },
     });
     expect(result.note).toContain(
       'Call getTimeline again with from 2005-01-01 and to 2005-01-29 for the rest.'
@@ -572,7 +576,62 @@ describe('MCP transport', () => {
       returned: 10,
       covered: { from: '2005-01-30', to: '2005-01-31' },
       complete: false,
-      continueWith: { from: '2005-01-29', to: '2005-01-29' },
+      continueWith: { from: '2005-01-29', to: '2005-01-29', limit: 12 },
+    });
+  });
+
+  it('resumes the same author-filtered query from continueWith unchanged', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          timelineRss([
+            ['2005-01-31', 5],
+            ['2005-01-30', 5],
+            ['2005-01-29', 5],
+          ])
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          timelineRss([
+            ['2005-01-30', 5],
+            ['2005-01-29', 5],
+          ])
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const first = await callTimeline({
+      from: '2005-01-29',
+      to: '2005-01-31',
+      author: 'saxmatt',
+      limit: 6,
+    });
+    expect(first.continueWith).toEqual({
+      from: '2005-01-29',
+      to: '2005-01-30',
+      author: 'saxmatt',
+      limit: 6,
+    });
+
+    const second = await callTimeline(first.continueWith ?? {});
+
+    expect(
+      Object.fromEntries(new URL(fetchMock.mock.calls[1]?.[0]?.toString() ?? '').searchParams)
+    ).toMatchObject({ from: '2005-01-30', daysback: '2', authors: 'saxmatt' });
+    expect(second).toMatchObject({
+      returned: 5,
+      requested: { from: '2005-01-29', to: '2005-01-30' },
+      covered: { from: '2005-01-30', to: '2005-01-30' },
+      complete: false,
+      continueWith: {
+        from: '2005-01-29',
+        to: '2005-01-29',
+        author: 'saxmatt',
+        limit: 6,
+      },
+      authors: ['saxmatt'],
     });
   });
 
@@ -603,7 +662,7 @@ describe('MCP transport', () => {
       returned: 500,
       covered: { from: '2005-01-31', to: '2005-01-31' },
       complete: false,
-      continueWith: { from: '2005-01-29', to: '2005-01-30' },
+      continueWith: { from: '2005-01-29', to: '2005-01-30', limit: 100 },
     });
     expect(result.note).toContain(
       '2005-01-31 alone filled the 500-event fetch limit, so only its newest events are included and that day is incomplete.'
