@@ -26,13 +26,22 @@ type TimelineContinuation = TimelineWindow & {
 };
 type TimelineResult = {
   results: Array<{ url: string; metadata: { date: string; author: string } }>;
-  returned: number;
-  requested: TimelineWindow;
-  covered: TimelineWindow;
-  complete: boolean;
+  returned?: number;
+  requested?: TimelineWindow;
+  covered?: TimelineWindow | null;
+  complete?: boolean;
   continueWith?: TimelineContinuation;
   authors?: string[];
-  note: string;
+  note?: string;
+  totalEvents?: number;
+  daysBack?: number;
+  terminalTruncation?: {
+    day: string;
+    reason: string;
+    fetchLimit: number;
+    returned: number;
+    canContinueWithinDay: boolean;
+  };
 };
 
 const EMPTY_RSS = '<?xml version="1.0"?><rss><channel></channel></rss>';
@@ -112,6 +121,16 @@ function zodCheck(def: ZodInternal['_def'], kind: string) {
   return def.checks?.find((check) => check.kind === kind);
 }
 
+function jsonSchemaFromZodNumber(def: ZodInternal['_def']) {
+  const minimum = zodCheck(def, 'min')?.value;
+  const maximum = zodCheck(def, 'max')?.value;
+  return {
+    type: zodCheck(def, 'int') === undefined ? 'number' : 'integer',
+    ...(minimum === undefined ? {} : { minimum }),
+    ...(maximum === undefined ? {} : { maximum }),
+  };
+}
+
 // Projects the runtime schema into the JSON Schema vocabulary tools/list uses,
 // so the advertised constraints can be compared instead of the property names.
 function jsonSchemaFromZod(schema: ZodInternal): Record<string, unknown> {
@@ -133,13 +152,7 @@ function jsonSchemaFromZod(schema: ZodInternal): Record<string, unknown> {
         ...(def.maxLength ? { maxItems: def.maxLength.value } : {}),
       };
     case 'ZodNumber': {
-      const minimum = zodCheck(def, 'min')?.value;
-      const maximum = zodCheck(def, 'max')?.value;
-      return {
-        type: 'number',
-        ...(minimum === undefined ? {} : { minimum }),
-        ...(maximum === undefined ? {} : { maximum }),
-      };
+      return jsonSchemaFromZodNumber(def);
     }
     case 'ZodString': {
       const pattern = zodCheck(def, 'regex')?.regex?.source;
@@ -422,35 +435,62 @@ describe('MCP transport', () => {
     expect(body.result.content.at(0)?.text).toContain('Forbidden');
   });
 
-  it.each([
-    [7, '2026-07-30'],
-    [1, '2026-08-05'],
-  ])('covers %i inclusive calendar days ending today', async (days, expectedFrom) => {
+  it.each([7, 1])(
+    'preserves the original recent-timeline contract for a %i-day request',
+    async (days) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));
+      const fetchMock = stubTimelineFetch(timelineRss([['2026-08-05', 2]]));
+
+      const result = await callTimeline({ days, limit: 2 });
+
+      expect(timelineParams(fetchMock)).toEqual({
+        from: '2026-08-05',
+        daysback: days.toString(),
+        max: '2',
+        format: 'rss',
+        ticket: 'on',
+        ticket_details: 'on',
+        'repo-': 'on',
+      });
+      expect(result).toMatchObject({ results: expect.any(Array), totalEvents: 2, daysBack: days });
+      expect(result).not.toHaveProperty('returned');
+      expect(result).not.toHaveProperty('requested');
+      expect(result).not.toHaveProperty('covered');
+      expect(result).not.toHaveProperty('complete');
+    }
+  );
+
+  it('keeps the original recent-timeline defaults for a bare call', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));
     const fetchMock = stubTimelineFetch(EMPTY_RSS);
 
-    const result = await callTimeline({ days, limit: 20 });
+    const result = await callTimeline({});
 
-    // daysback covers the from-day plus N more days, so one day of slack.
-    expect(timelineParams(fetchMock)).toEqual({
+    expect(timelineParams(fetchMock)).toMatchObject({ daysback: '7', max: '20' });
+    expect(result).toMatchObject({ results: [], totalEvents: 0, daysBack: 7 });
+    expect(result).not.toHaveProperty('complete');
+  });
+
+  it('uses whole-day coverage for a recent author-filtered request', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));
+    const fetchMock = stubTimelineFetch(EMPTY_RSS);
+
+    const result = await callTimeline({ days: 7, author: 'saxmatt', limit: 20 });
+
+    expect(timelineParams(fetchMock)).toMatchObject({
       from: '2026-08-05',
-      daysback: days.toString(),
+      daysback: '7',
       max: '500',
-      format: 'rss',
-      ticket: 'on',
-      ticket_details: 'on',
-      'repo-': 'on',
+      authors: 'saxmatt',
     });
     expect(result).toMatchObject({
-      results: [],
-      returned: 0,
-      requested: { from: expectedFrom, to: '2026-08-05' },
-      covered: { from: expectedFrom, to: '2026-08-05' },
+      requested: { from: '2026-07-30', to: '2026-08-05' },
+      covered: { from: '2026-07-30', to: '2026-08-05' },
       complete: true,
     });
-    expect(result).not.toHaveProperty('continueWith');
-    expect(result.note).toContain("Today's events reflect the time of the request.");
   });
 
   it.each([
@@ -660,10 +700,18 @@ describe('MCP transport', () => {
 
     expect(result).toMatchObject({
       returned: 500,
-      covered: { from: '2005-01-31', to: '2005-01-31' },
+      covered: null,
       complete: false,
       continueWith: { from: '2005-01-29', to: '2005-01-30', limit: 100 },
+      terminalTruncation: {
+        day: '2005-01-31',
+        reason: 'single_day_fetch_limit',
+        fetchLimit: 500,
+        returned: 500,
+        canContinueWithinDay: false,
+      },
     });
+    expect(result.note).toContain('No complete day is covered');
     expect(result.note).toContain(
       '2005-01-31 alone filled the 500-event fetch limit, so only its newest events are included and that day is incomplete.'
     );
@@ -676,22 +724,36 @@ describe('MCP transport', () => {
 
     expect(result).toMatchObject({
       returned: 500,
-      covered: { from: '2005-01-31', to: '2005-01-31' },
+      covered: null,
       complete: false,
+      terminalTruncation: {
+        day: '2005-01-31',
+        canContinueWithinDay: false,
+      },
     });
     expect(result).not.toHaveProperty('continueWith');
   });
 
-  it('accepts calendar dates in years below 1000', async () => {
-    const fetchMock = stubTimelineFetch(EMPTY_RSS);
+  it('returns malformed timeline dates as a tool error instead of incomplete success', async () => {
+    stubTimelineFetch(`<?xml version="1.0"?><rss><channel><item>
+      <title>Malformed event</title><dc:creator>saxmatt</dc:creator>
+      <pubDate>not a date</pubDate><link>https://core.trac.wordpress.org/ticket/1</link>
+      <description>bad upstream data</description>
+    </item></channel></rss>`);
 
-    const result = await callTimeline({ from: '0099-12-31', to: '0100-01-05' });
-
-    expect(timelineParams(fetchMock)).toMatchObject({ from: '0100-01-05', daysback: '6' });
-    expect(result).toMatchObject({
-      requested: { from: '0099-12-31', to: '0100-01-05' },
-      complete: true,
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTimeline',
+        arguments: { from: '2005-01-01', to: '2005-01-02' },
+      },
     });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('missing or invalid pubDate');
   });
 
   it.each([
@@ -701,6 +763,11 @@ describe('MCP transport', () => {
       'days cannot be combined with from or to',
     ],
     ['an impossible calendar date', { from: '2005-02-31' }, 'not a valid calendar date'],
+    [
+      'a date before WordPress Core Trac history',
+      { from: '2004-12-31', to: '2005-01-01' },
+      'must not be earlier than 2005-01-01',
+    ],
     ['an end date in the future', { to: '2999-01-01' }, 'to must not be later than today'],
     [
       'an inverted date range',

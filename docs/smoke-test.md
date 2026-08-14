@@ -99,13 +99,13 @@ What to look for:
 - `getTicket` returns `id`, `title`, `text`, `url`, and `metadata`. With comments requested, `metadata` carries `comments`, `returnedComments`, and `totalComments`.
 - Tickets `65808`, `65793`, and `62358` each carry `metadata.linkedPullRequests`. `65793` also carries `metadata.attachments`, and `62358` also carries `metadata.changesets`, neither of them folded into the comment list.
 - `getChangeset` returns the revision, author, date, message, and file list. With `includeDiff`, the text includes diff hunks and respects `diffLimit`.
-- `getTimeline` returns recent events, and `getTracInfo` returns the requested vocabulary. A seven day window is used because a quiet day can legitimately produce no events. An empty list is a valid answer for any short window, so judge this check on the request succeeding rather than on the count.
+- The recent `getTimeline` call keeps the original response shape: it returns `results`, `totalEvents`, `daysBack`, and `timelineUrl`, and `totalEvents` is at most the requested `limit` of 5. A seven day window is used because a quiet day can legitimately produce no events. An empty list is a valid answer for any short window, so judge this check on the request succeeding rather than on the count. `getTracInfo` returns the requested vocabulary.
 - The historical `getTimeline` call proves the server answers from the requested range rather than from recent activity: every event carries `saxmatt` as `metadata.author` with a January 2005 date. January 2005 is immutable history, so this call should never legitimately come back empty.
 - That same call shows the coverage envelope. `requested` is the window that was asked for, `covered` is a whole-day window inside it, `complete` is `false` because the month holds more events than `limit`, and `continueWith.to` is the day before `covered.from`. `continueWith` also preserves `author` as `saxmatt` and `limit` as `20`, so it is the complete next request. `returned` counts the events in `results`, `authors` lists `saxmatt`, and `note` describes the coverage in words. No `page`, `pageSize`, `hasMore`, `nextPage`, `totalEvents`, `returnedEvents`, or `daysBack` field should appear.
 
 ## 4. Timeline coverage walk
 
-A response covers whole days, not a page, so the way to reach the end of a range is to resend the `continueWith` window the server hands back until a response reports `complete` as `true`. Paste this helper, which does exactly that and keeps a running total:
+A date-range or author-filtered response covers whole days, not a page, so the way to reach the end of a range is to resend the `continueWith` window the server hands back until a response reports `complete` as `true`. Paste this helper, which does exactly that and keeps a running total:
 
 ```bash
 walk_timeline() {
@@ -132,7 +132,7 @@ The helper sends nothing of its own after the first call: each later request is 
 
 What to look for:
 
-- One line per step, ending with a step whose `complete` is `True` and which carries no `continueWith`. Termination is the point of this check. The old page-based smoke test never ran a final page, so it never tested that a walk ends. A walk can also stop on `complete False` when a single day overflows the fetch cap and leaves no remainder to continue with, but that cannot happen for this fixture, and `note` would say so.
+- One line per step, ending with a step whose `complete` is `True` and which carries no `continueWith`. Termination is the point of this check. The old page-based smoke test never ran a final page, so it never tested that a walk ends. A walk can also stop with `complete` false and `covered` null when a single day overflows the fetch cap. In that case `terminalTruncation` and `note` explain that the tool cannot continue within that day. That cannot happen for this fixture.
 - Each step's `requested` is the previous step's `continueWith`, and each step's `covered` falls inside its own `requested`.
 - Each step's `covered.to` is the day before the previous step's `covered.from`. Read down the printed windows: they should tile `2005-01-01` to `2005-01-31` with no gap and no repeated day.
 - `events: 89` at the end. That is the whole saxmatt January 2005 window. The total must not depend on `limit`: the second run should print the same total with more steps and narrower windows. A different total means either the walk lost a day or the fixture moved, so compare it against Trac's own timeline for that range and author before treating it as a regression.
@@ -168,12 +168,13 @@ call /mcp getTicket '{"id":"not-a-number"}'
 call /mcp getChangeset '{"revision":-1}'
 call /mcp getTimeline '{"days":7,"from":"2005-01-01"}'
 call /mcp getTimeline '{"to":"2099-01-01"}'
+call /mcp getTimeline '{"from":"2004-12-31","to":"2005-01-01"}'
 call /mcp getTracInfo '{}'
 ```
 
 Every one of these returns a JSON-RPC error rather than a success envelope or a crash. Bad arguments come back as `-32602` invalid params with the failing field named. A malformed request that returns `200` with empty content is a bug.
 
-Both `getTimeline` calls must fail in validation, before any upstream request: `days` cannot be combined with `from` or `to`, and `to` cannot be a future date. A future `to` that returns an empty success envelope instead of an error is a bug.
+All three `getTimeline` calls must fail in validation, before any upstream request: `days` cannot be combined with `from` or `to`, `to` cannot be a future date, and dates before `2005-01-01` are outside the verified WordPress Core Trac timeline. A future or too-early date that returns an empty success envelope instead of an error is a bug.
 
 ## Reading a failure
 
