@@ -567,6 +567,31 @@ describe('MCP transport', () => {
     });
   });
 
+  it('reports an upstream error when ticket CSV data exists but history is missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+        .mockResolvedValueOnce(new Response('Not Found', { status: 404, statusText: 'Not Found' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65808 } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'Trac returned inconsistent data for ticket 65808',
+    });
+  });
+
   it('reports an upstream error, not a missing ticket, when the history fetch fails', async () => {
     vi.stubGlobal(
       'fetch',
@@ -636,30 +661,107 @@ describe('MCP transport', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each(['99999999', 'r99999999'])(
-    'returns no search matches when direct lookup %s does not exist',
-    async (query) => {
-      vi.stubGlobal(
-        'fetch',
-        vi
-          .fn<typeof fetch>()
-          .mockResolvedValue(new Response('', { status: 404, statusText: 'Not Found' }))
-      );
+  it('returns no search matches when an exact ticket does not exist', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n'))
+        .mockResolvedValueOnce(new Response('', { status: 404, statusText: 'Not Found' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
 
-      const response = await mcpRequest(
-        {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/call',
-          params: { name: 'search', arguments: { query } },
-        },
-        '/mcp/chatgpt'
-      );
-      const body = (await response.json()) as RpcBody;
-      const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: '99999999' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
 
-      expect(body.result.isError).toBeUndefined();
-      expect(result).toEqual({ results: [], query, totalFound: 0 });
-    }
-  );
+    expect(body.result.isError).toBeUndefined();
+    expect(result).toEqual({ results: [], query: '99999999', totalFound: 0 });
+  });
+
+  it('returns no search matches when an exact changeset does not exist', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('', { status: 404, statusText: 'Not Found' }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: 'r99999999' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBeUndefined();
+    expect(result).toEqual({ results: [], query: 'r99999999', totalFound: 0 });
+  });
+
+  it('propagates an upstream error from an exact ticket search', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+        .mockResolvedValueOnce(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: '65808' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'HTTP 403: Forbidden',
+    });
+  });
+
+  it('propagates an upstream error from an exact changeset search', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: 'r58504' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'HTTP 403: Forbidden',
+    });
+  });
 });

@@ -682,6 +682,12 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
 
   const record = records.find((candidate) => Number.parseInt(candidate.id ?? '', 10) === ticketId);
   if (rssResponse.status === 404) {
+    if (record) {
+      throw new ToolError(
+        'upstream_error',
+        `Trac returned inconsistent data for ticket ${ticketId}`
+      );
+    }
     throw new ToolError('not_found', `Ticket ${ticketId} not found`, {
       resource: 'ticket',
       id: ticketId,
@@ -1412,7 +1418,10 @@ async function runChatGptSearch(query: string) {
         false
       );
       return { results: [ticket], query, totalFound: 1 };
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ToolError) || error.code !== 'not_found') {
+        throw error;
+      }
       return { results: [], query, totalFound: 0 };
     }
   }
@@ -1420,7 +1429,10 @@ async function runChatGptSearch(query: string) {
     try {
       const changeset = await getChangesetForChatGPT(Number.parseInt(trimmed.slice(1), 10), false);
       return { results: [changeset], query, totalFound: 1 };
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ToolError) || error.code !== 'not_found') {
+        throw error;
+      }
       return { results: [], query, totalFound: 0 };
     }
   }
