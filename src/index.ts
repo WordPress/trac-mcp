@@ -1297,7 +1297,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
         },
         serverInfo: {
           name: tracDisplayName(instance),
-          version: '1.0.0',
+          version: '1.1.0',
         },
       });
 
@@ -1493,7 +1493,7 @@ export async function handleChatGPTMcpRequest(instance: TracInstance, request: J
         },
         serverInfo: {
           name: tracDisplayName(instance),
-          version: '1.0.0',
+          version: '1.1.0',
         },
       });
 

@@ -30,7 +30,7 @@ Green CI does not mean the feature works: every automated test mocks Trac. Follo
 - Keep upstream requests on `*.trac.wordpress.org` and the official linked-PR endpoint at `api.wordpress.org/dotorg/trac/pr/`.
 - Take the Trac instance from the endpoint path, never from a tool argument. Binding it to the connection is what stops a client reading the wrong Trac.
 - Expect fields to differ between instances. Report a field an instance does not configure as unavailable rather than failing, but keep failing when the page is not a Trac query page at all.
-- Never let a filter reach Trac on a field the instance does not configure. Trac ignores it and returns the unfiltered result set, which is indistinguishable from a real answer. Check against the filter picker Trac renders on every query page, and treat that list as the authority for which fields exist.
+- Never return results for a filter on a field the instance does not configure. Trac ignores such a filter and returns the unfiltered result set, which is indistinguishable from a real answer. The query and the field check run together, so the guard discards the response rather than preventing the request. Check against the filter picker Trac renders on every query page, and treat that list as the authority for which fields exist.
 - Return upstream failures as MCP tool errors.
 - Update README and manual checks when behavior changes.
 - Do not deploy without explicit maintainer approval.
