@@ -78,9 +78,79 @@ const LinkedPullRequestSchema = z.object({
 
 class UnknownToolError extends Error {}
 
+/*
+ * Distinct from an ordinary upstream failure so callers that turn "not found"
+ * into an empty result do not also swallow a Trac that does not exist.
+ */
+class UnknownTracInstanceError extends Error {}
+
 const TRAC_USER_AGENT = 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)';
-const TRAC_ORIGIN = 'https://core.trac.wordpress.org';
 const TRAC_RETRY_DELAYS_MS = [2000, 4000, 8000] as const;
+
+const TRAC_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
+/*
+ * `chatgpt` is a route keyword rather than an instance, so /mcp/chatgpt keeps
+ * meaning "core, ChatGPT tools" instead of resolving a Trac named chatgpt.
+ */
+const RESERVED_TRAC_SLUGS = new Set(['chatgpt']);
+
+/*
+ * Known instances, in landing page order. Any other well-formed slug still
+ * resolves and falls back to its slug as a label; this is a discovery aid
+ * rather than an allowlist.
+ */
+const TRAC_LABELS: Record<string, string> = {
+  core: 'WordPress',
+  meta: 'Making WordPress.org',
+  themes: 'WordPress Themes',
+  plugins: 'WordPress Plugins',
+  bbpress: 'bbPress',
+  buddypress: 'BuddyPress',
+  glotpress: 'GlotPress',
+  gsoc: 'Google Summer of Code',
+};
+
+export type TracInstance = {
+  slug: string;
+  origin: string;
+  label: string;
+};
+
+/**
+ * Build an instance from a slug that has already been validated.
+ *
+ * @param slug Subdomain label of a *.trac.wordpress.org instance.
+ * @return The instance.
+ */
+function makeTracInstance(slug: string): TracInstance {
+  return {
+    slug,
+    origin: `https://${slug}.trac.wordpress.org`,
+    label: TRAC_LABELS[slug] ?? slug,
+  };
+}
+
+/**
+ * Resolve a URL path segment to a Trac instance.
+ *
+ * @param slug Subdomain label of a *.trac.wordpress.org instance.
+ * @return The instance, or null when the slug is malformed or reserved.
+ */
+export function tracInstance(slug: string): TracInstance | null {
+  return TRAC_SLUG_PATTERN.test(slug) && !RESERVED_TRAC_SLUGS.has(slug)
+    ? makeTracInstance(slug)
+    : null;
+}
+
+export const CORE_TRAC = makeTracInstance('core');
+
+/**
+ * Human-readable name for an instance, used in server info and tool output.
+ */
+function tracDisplayName(instance: TracInstance): string {
+  return `${instance.label} Trac`;
+}
 const TICKET_COLUMNS = [
   'id',
   'summary',
@@ -123,26 +193,85 @@ async function isTransientTracResponse(response: Response): Promise<boolean> {
   return /Checking your browser/i.test(await response.clone().text());
 }
 
+/**
+ * Whether a response is a redirect that must not be followed.
+ *
+ * The status range is what `redirect: 'manual'` produces. `redirected` cannot be
+ * true alongside it and is kept as a backstop: a runtime that ignored the option
+ * would hand back another instance's page, which is the one thing never to return.
+ *
+ * @param response Response to a request that asked not to follow redirects.
+ * @return True when the response redirects.
+ */
+function isRedirect(response: Response): boolean {
+  return response.redirected || (response.status >= 300 && response.status < 400);
+}
+
+/**
+ * Origin a redirect response points at.
+ *
+ * @param response A redirect response.
+ * @param requestUrl URL the response answers, used to resolve a relative target.
+ * @return The target origin, or null when there is no usable Location header.
+ */
+function redirectOrigin(response: Response, requestUrl: URL): string | null {
+  const location = response.headers.get('location');
+  if (!location) {
+    return null;
+  }
+
+  try {
+    return new URL(location, requestUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Failure to report for a redirect, which is never followed.
+ *
+ * @param instance Instance the request addressed.
+ * @param response The redirect response.
+ * @param requestUrl URL the response answers.
+ * @return The error to throw.
+ */
+function redirectError(instance: TracInstance, response: Response, requestUrl: URL): Error {
+  // A slug with no Trac behind it redirects off-origin; one that stays put is something else.
+  const target = redirectOrigin(response, requestUrl);
+  return target && target !== instance.origin
+    ? new UnknownTracInstanceError(`Unknown or unavailable Trac instance: ${instance.slug}`)
+    : new Error(`Unexpected redirect from ${instance.origin}: HTTP ${response.status}`);
+}
+
 export async function fetchTrac(
+  instance: TracInstance,
   input: string | URL,
   init?: RequestInit,
   retryDelays: readonly number[] = TRAC_RETRY_DELAYS_MS
 ): Promise<Response> {
   const url = new URL(input);
-  if (url.origin !== TRAC_ORIGIN) {
+  if (url.origin !== instance.origin) {
     throw new Error(`Refusing non-Trac request host: ${url.hostname}`);
   }
 
   for (let attempt = 0; ; attempt++) {
+    let response: Response;
     try {
-      const response = await fetch(url.toString(), init);
-      if (!(await isTransientTracResponse(response)) || attempt >= retryDelays.length) {
-        return response;
-      }
+      // Never follow a redirect: unknown subdomains point at core, whose data is not ours to return.
+      response = await fetch(url.toString(), { ...init, redirect: 'manual' });
     } catch (error) {
       if (attempt >= retryDelays.length) {
         throw error;
       }
+      await wait(retryDelays[attempt] ?? 0);
+      continue;
+    }
+
+    if (isRedirect(response)) {
+      throw redirectError(instance, response, url);
+    }
+    if (!(await isTransientTracResponse(response)) || attempt >= retryDelays.length) {
+      return response;
     }
 
     await wait(retryDelays[attempt] ?? 0);
@@ -347,6 +476,7 @@ type ClassifiedTicketHistory =
   | { kind: 'comment'; entry: TicketHistoryEntry };
 
 function classifyTicketHistoryItem(
+  instance: TracInstance,
   ticketId: number,
   item: RssItem
 ): ClassifiedTicketHistory | null {
@@ -368,7 +498,7 @@ function classifyTicketHistoryItem(
         timestamp: item.date,
         description: parsedDescription.body,
         url: filename
-          ? `https://core.trac.wordpress.org/raw-attachment/ticket/${ticketId}/${encodeURIComponent(filename)}`
+          ? `${instance.origin}/raw-attachment/ticket/${ticketId}/${encodeURIComponent(filename)}`
           : '',
       },
     };
@@ -388,7 +518,7 @@ function classifyTicketHistoryItem(
         timestamp: item.date,
         changes: filterTicketFieldChurn(item.title),
         message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length)),
-        url: `https://core.trac.wordpress.org/changeset/${revision}`,
+        url: `${instance.origin}/changeset/${revision}`,
       },
     };
   }
@@ -411,13 +541,13 @@ function classifyTicketHistoryItem(
   };
 }
 
-function classifyTicketHistory(ticketId: number, rssText: string) {
+function classifyTicketHistory(instance: TracInstance, ticketId: number, rssText: string) {
   const comments: TicketHistoryEntry[] = [];
   const attachments: TicketAttachment[] = [];
   const changesets: TicketChangeset[] = [];
 
   for (const item of parseRssItems(rssText)) {
-    const classified = classifyTicketHistoryItem(ticketId, item);
+    const classified = classifyTicketHistoryItem(instance, ticketId, item);
     if (classified?.kind === 'comment') {
       comments.push(classified.entry);
     } else if (classified?.kind === 'attachment') {
@@ -445,6 +575,45 @@ export function parseCsvRecords(csvData: string): TracRecord[] {
       headers.map((header, index) => [header, values[index]?.trim() ?? ''])
     );
   });
+}
+
+/**
+ * Ticket fields an instance configures, read from the filter picker on a query page.
+ *
+ * Instances differ: themes has no component, and only some have severity. Trac
+ * drops a filter on a field it does not configure instead of rejecting it, so
+ * this list is what separates an unsupported filter from a matching one.
+ *
+ * @param html A Trac query page.
+ * @return The configured field names, or null when the page is not a query page.
+ */
+function configuredTracFields(html: string): Set<string> | null {
+  const picker = html.match(/<select[^>]*\bname="add_filter_0"[^>]*>([\s\S]*?)<\/select>/i)?.[1];
+  if (picker === undefined) {
+    return null;
+  }
+
+  return new Set(
+    Array.from(
+      picker.matchAll(/<option[^>]*\bvalue="([^"]+)"/gi),
+      (match) => match[1] ?? ''
+    ).filter(Boolean)
+  );
+}
+
+// Query parameters this server sets for itself; everything else it adds is a filter.
+const QUERY_CONTROL_PARAMS = new Set(['col', 'format', 'max', 'page']);
+
+/**
+ * Ticket fields a query URL filters on.
+ *
+ * @param url A Trac query URL this server built.
+ * @return The field names filtered on, without the parameters that shape the response.
+ */
+function ticketFilterFields(url: URL): string[] {
+  return Array.from(new Set(url.searchParams.keys())).filter(
+    (name) => !QUERY_CONTROL_PARAMS.has(name)
+  );
 }
 
 function addColumns(url: URL, columns: readonly string[]): void {
@@ -493,8 +662,8 @@ export function addTicketSearchQuery(url: URL, query: string): void {
   }
 }
 
-async function fetchCsvRecords(url: URL): Promise<TracRecord[]> {
-  const response = await fetchTrac(url, {
+async function fetchCsvRecords(instance: TracInstance, url: URL): Promise<TracRecord[]> {
+  const response = await fetchTrac(instance, url, {
     headers: {
       'User-Agent': TRAC_USER_AGENT,
       Accept: 'text/csv,text/plain,*/*',
@@ -534,11 +703,15 @@ function ticketFromRecord(record: TracRecord) {
   };
 }
 
-async function fetchLinkedPullRequests(ticketId: number): Promise<LinkedPullRequest[]> {
+async function fetchLinkedPullRequests(
+  instance: TracInstance,
+  ticketId: number
+): Promise<LinkedPullRequest[]> {
   const pullRequestsUrl = new URL('https://api.wordpress.org/dotorg/trac/pr/');
-  pullRequestsUrl.searchParams.set('trac', 'core');
+  pullRequestsUrl.searchParams.set('trac', instance.slug);
   pullRequestsUrl.searchParams.set('ticket', ticketId.toString());
 
+  // One fixed host rather than a wildcard domain, so a redirect means it moved: follow it.
   const response = await fetch(pullRequestsUrl.toString(), {
     headers: {
       'User-Agent': TRAC_USER_AGENT,
@@ -575,12 +748,13 @@ async function fetchLinkedPullRequests(ticketId: number): Promise<LinkedPullRequ
 }
 
 export async function searchTracTickets(
+  instance: TracInstance,
   query: string,
   limit: number,
   page: number,
   filters: TicketSearchFilters = {}
 ) {
-  const queryUrl = new URL('https://core.trac.wordpress.org/query');
+  const queryUrl = new URL(`${instance.origin}/query`);
   const pageSize = Math.min(Math.max(Math.trunc(limit), 1), 50);
   const pageNumber = Math.max(Math.trunc(page), 1);
   queryUrl.searchParams.set('format', 'csv');
@@ -609,11 +783,19 @@ export async function searchTracTickets(
   totalUrl.searchParams.delete('format');
   totalUrl.searchParams.delete('page');
   const [records, totalResponse] = await Promise.all([
-    fetchCsvRecords(queryUrl),
-    fetchTrac(totalUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
+    fetchCsvRecords(instance, queryUrl),
+    fetchTrac(instance, totalUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
   ]);
   const tickets = records.map(ticketFromRecord);
+  const filterFields = ticketFilterFields(queryUrl);
   if (!totalResponse.ok) {
+    // Without the field list, a filter Trac dropped cannot be told from one it applied.
+    if (filterFields.length) {
+      throw new Error(
+        `Cannot confirm the ${filterFields.join(' and ')} filter against ${tracDisplayName(instance)} because its query page returned HTTP ${totalResponse.status}. Trac ignores a filter on a field it does not configure, so these results could be the whole ticket list.`
+      );
+    }
+
     return {
       tickets,
       totalFound: (pageNumber - 1) * pageSize + tickets.length,
@@ -625,6 +807,18 @@ export async function searchTracTickets(
   }
 
   const totalHtml = await totalResponse.text();
+
+  // The count page is a query page, so it carries the field list this filter has to exist in.
+  const configured = configuredTracFields(totalHtml);
+  if (configured) {
+    const unsupported = filterFields.filter((field) => !configured.has(field));
+    if (unsupported.length) {
+      throw new Error(
+        `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
+      );
+    }
+  }
+
   const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
   if (!totalMatch?.[1]) {
     throw new Error('Trac did not return the total ticket count');
@@ -641,18 +835,23 @@ export async function searchTracTickets(
   };
 }
 
-async function fetchTicket(ticketId: number, includeComments: boolean, commentLimit = 10) {
-  const queryUrl = new URL('https://core.trac.wordpress.org/query');
+async function fetchTicket(
+  instance: TracInstance,
+  ticketId: number,
+  includeComments: boolean,
+  commentLimit = 10
+) {
+  const queryUrl = new URL(`${instance.origin}/query`);
   queryUrl.searchParams.set('format', 'csv');
   queryUrl.searchParams.set('max', '1');
   queryUrl.searchParams.set('id', ticketId.toString());
   addColumns(queryUrl, TICKET_COLUMNS);
 
-  const rssUrl = `https://core.trac.wordpress.org/ticket/${ticketId}?format=rss`;
+  const rssUrl = `${instance.origin}/ticket/${ticketId}?format=rss`;
   const [records, rssResponse, linkedPullRequestsResult] = await Promise.all([
-    fetchCsvRecords(queryUrl),
-    fetchTrac(rssUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
-    fetchLinkedPullRequests(ticketId)
+    fetchCsvRecords(instance, queryUrl),
+    fetchTrac(instance, rssUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
+    fetchLinkedPullRequests(instance, ticketId)
       .then((linkedPullRequests) => ({ linkedPullRequests, unavailable: false }))
       .catch(() => ({ linkedPullRequests: [], unavailable: true })),
   ]);
@@ -665,7 +864,7 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
   const rssText = await rssResponse.text();
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
   const description = cleanTracText(extractXmlElement(channel, 'description'));
-  const history = classifyTicketHistory(ticketId, rssText);
+  const history = classifyTicketHistory(instance, ticketId, rssText);
   const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
   const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
@@ -682,6 +881,7 @@ async function fetchTicket(ticketId: number, includeComments: boolean, commentLi
 }
 
 function formatTicketResult(
+  instance: TracInstance,
   ticketData: Awaited<ReturnType<typeof fetchTicket>>,
   includeComments: boolean,
   stringId = false
@@ -768,7 +968,7 @@ Focuses: ${ticket.focuses}
 
 Description:
 ${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}`,
-    url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
+    url: `${instance.origin}/ticket/${ticket.id}`,
     metadata: {
       ticket,
       comments,
@@ -782,9 +982,14 @@ ${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText
   };
 }
 
-async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit = 2000) {
-  const changesetUrl = `https://core.trac.wordpress.org/changeset/${revision}`;
-  const response = await fetchTrac(changesetUrl, {
+async function fetchChangeset(
+  instance: TracInstance,
+  revision: number,
+  includeDiff: boolean,
+  diffLimit = 2000
+) {
+  const changesetUrl = `${instance.origin}/changeset/${revision}`;
+  const response = await fetchTrac(instance, changesetUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
 
@@ -810,7 +1015,7 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
   let diff = '';
   if (includeDiff) {
     try {
-      const diffResponse = await fetchTrac(`${changesetUrl}?format=diff`, {
+      const diffResponse = await fetchTrac(instance, `${changesetUrl}?format=diff`, {
         headers: { 'User-Agent': TRAC_USER_AGENT },
       });
       if (diffResponse.ok) {
@@ -829,6 +1034,7 @@ async function fetchChangeset(revision: number, includeDiff: boolean, diffLimit 
 }
 
 function formatChangesetResult(
+  instance: TracInstance,
   changeset: Awaited<ReturnType<typeof fetchChangeset>>,
   prefixedId = false
 ) {
@@ -848,7 +1054,7 @@ Files changed: ${changeset.files.length}
 ${filesText}${changeset.files.length > 10 ? '\n...' : ''}
 
 ${changeset.diff ? `Diff:\n${changeset.diff}` : 'No diff available'}`,
-    url: `https://core.trac.wordpress.org/changeset/${changeset.revision}`,
+    url: `${instance.origin}/changeset/${changeset.revision}`,
     metadata: {
       changeset,
       totalFiles: changeset.files.length,
@@ -856,10 +1062,13 @@ ${changeset.diff ? `Diff:\n${changeset.diff}` : 'No diff available'}`,
   };
 }
 
-async function fetchTracFieldOptions(field: 'component' | 'severity'): Promise<string[]> {
-  const queryUrl = new URL('https://core.trac.wordpress.org/query');
+async function fetchTracFieldOptions(
+  instance: TracInstance,
+  field: 'component' | 'severity'
+): Promise<TracInfoResult> {
+  const queryUrl = new URL(`${instance.origin}/query`);
   queryUrl.searchParams.set(field, '');
-  const response = await fetchTrac(queryUrl, {
+  const response = await fetchTrac(instance, queryUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
 
@@ -868,16 +1077,28 @@ async function fetchTracFieldOptions(field: 'component' | 'severity'): Promise<s
   }
 
   const html = await response.text();
+  const configured = configuredTracFields(html);
+  if (!configured) {
+    throw new Error(`Trac did not return ${field} options`);
+  }
+  if (!configured.has(field)) {
+    return { data: [], configured: false };
+  }
+
+  // The field exists here, so a missing option list is a parse failure rather than an answer.
   const select = html.match(
-    new RegExp(`<select\\s+name="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
+    new RegExp(`<select[^>]*\\bname="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
   )?.[1];
   if (!select) {
     throw new Error(`Trac did not return ${field} options`);
   }
 
-  return Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
-    cleanTracText(match[1] ?? '')
-  ).filter(Boolean);
+  return {
+    data: Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
+      cleanTracText(match[1] ?? '')
+    ).filter(Boolean),
+    configured: true,
+  };
 }
 
 type TracInfoType =
@@ -888,9 +1109,16 @@ type TracInfoType =
   | 'types'
   | 'statuses';
 
-async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
+/*
+ * Whether the instance configures the field at all, which only the picker-backed
+ * types can answer. The rest read values off tickets, where an empty result means
+ * no ticket carried one rather than no such field.
+ */
+type TracInfoResult = { data: string[]; configured: boolean };
+
+async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promise<TracInfoResult> {
   if (type === 'components' || type === 'severities') {
-    return fetchTracFieldOptions(type === 'components' ? 'component' : 'severity');
+    return fetchTracFieldOptions(instance, type === 'components' ? 'component' : 'severity');
   }
 
   const fieldByType = {
@@ -900,19 +1128,19 @@ async function fetchTracInfo(type: TracInfoType): Promise<string[]> {
     statuses: 'status',
   } as const;
   const field = fieldByType[type];
-  const queryUrl = new URL('https://core.trac.wordpress.org/query');
+  const queryUrl = new URL(`${instance.origin}/query`);
   queryUrl.searchParams.set('format', 'csv');
   queryUrl.searchParams.set('max', '1000');
   addColumns(queryUrl, [field]);
 
-  const values = (await fetchCsvRecords(queryUrl))
+  const values = (await fetchCsvRecords(instance, queryUrl))
     .map((record) => record[field]?.trim() ?? '')
     .filter(Boolean);
-  return Array.from(new Set(values)).sort();
+  return { data: Array.from(new Set(values)).sort(), configured: true };
 }
 
-async function fetchTimeline(days: number, limit: number) {
-  const timelineUrl = new URL('https://core.trac.wordpress.org/timeline');
+async function fetchTimeline(instance: TracInstance, days: number, limit: number) {
+  const timelineUrl = new URL(`${instance.origin}/timeline`);
   timelineUrl.searchParams.set('from', new Date().toISOString().slice(0, 10));
   timelineUrl.searchParams.set('daysback', days.toString());
   timelineUrl.searchParams.set('max', limit.toString());
@@ -921,7 +1149,7 @@ async function fetchTimeline(days: number, limit: number) {
   timelineUrl.searchParams.set('ticket_details', 'on');
   timelineUrl.searchParams.set('repo-', 'on');
 
-  const response = await fetchTrac(timelineUrl, {
+  const response = await fetchTrac(instance, timelineUrl, {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
   if (!response.ok) {
@@ -960,12 +1188,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error';
 }
 
-async function executeStandardTool(name: string, input: unknown): Promise<unknown> {
+async function executeStandardTool(
+  instance: TracInstance,
+  name: string,
+  input: unknown
+): Promise<unknown> {
   switch (name) {
     case 'searchTickets': {
       const { query, limit, page, status, component, milestone, resolution } =
         SearchTicketsArgsSchema.parse(input ?? {});
-      const search = await searchTracTickets(query, limit, page, {
+      const search = await searchTracTickets(instance, query, limit, page, {
         status,
         component,
         milestone,
@@ -976,7 +1208,7 @@ async function executeStandardTool(name: string, input: unknown): Promise<unknow
           id: ticket.id,
           title: ticket.summary,
           text: `#${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status || 'unknown'}\nOwner: ${ticket.owner || 'unassigned'}\nType: ${ticket.type || 'unknown'}\nPriority: ${ticket.priority || 'unknown'}\nMilestone: ${ticket.milestone || 'none'}\nComponent: ${ticket.component || 'unknown'}`,
-          url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
+          url: `${instance.origin}/ticket/${ticket.id}`,
           metadata: {
             status: ticket.status,
             owner: ticket.owner,
@@ -998,35 +1230,46 @@ async function executeStandardTool(name: string, input: unknown): Promise<unknow
     case 'getTicket': {
       const { id, includeComments, commentLimit } = GetTicketArgsSchema.parse(input);
       return formatTicketResult(
-        await fetchTicket(id, includeComments, commentLimit),
+        instance,
+        await fetchTicket(instance, id, includeComments, commentLimit),
         includeComments
       );
     }
 
     case 'getChangeset': {
       const { revision, includeDiff, diffLimit } = GetChangesetArgsSchema.parse(input);
-      return formatChangesetResult(await fetchChangeset(revision, includeDiff, diffLimit));
+      return formatChangesetResult(
+        instance,
+        await fetchChangeset(instance, revision, includeDiff, diffLimit)
+      );
     }
 
     case 'getTimeline': {
       const { days, limit } = GetTimelineArgsSchema.parse(input ?? {});
-      const events = await fetchTimeline(days, limit);
+      const events = await fetchTimeline(instance, days, limit);
       return {
         results: events,
         totalEvents: events.length,
         daysBack: days,
-        timelineUrl: 'https://core.trac.wordpress.org/timeline',
+        timelineUrl: `${instance.origin}/timeline`,
       };
     }
 
     case 'getTracInfo': {
       const { type } = GetTracInfoArgsSchema.parse(input);
-      const data = await fetchTracInfo(type);
+      const { data, configured } = await fetchTracInfo(instance, type);
+      const tracName = tracDisplayName(instance);
+      const heading = type.charAt(0).toUpperCase() + type.slice(1);
+      const emptyText = configured
+        ? `No ${type} found in ${tracName}.`
+        : `${heading} are not available in ${tracName}.`;
       return {
         id: type,
-        title: `WordPress Trac ${type}`,
-        text: `${type.charAt(0).toUpperCase() + type.slice(1)} available in WordPress Trac:\n\n${data.join('\n')}`,
-        url: 'https://core.trac.wordpress.org/',
+        title: `${tracName} ${type}`,
+        text: data.length
+          ? `${heading} available in ${tracName}:\n\n${data.join('\n')}`
+          : emptyText,
+        url: `${instance.origin}/`,
         metadata: { type, data, total: data.length },
       };
     }
@@ -1039,7 +1282,7 @@ async function executeStandardTool(name: string, input: unknown): Promise<unknow
 /**
  * Handle MCP JSON-RPC 2.0 requests
  */
-export async function handleMcpRequest(request: JsonRpcRequest) {
+export async function handleMcpRequest(instance: TracInstance, request: JsonRpcRequest) {
   const { method, params, id } = request;
   if (id === undefined) {
     return null;
@@ -1053,7 +1296,7 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
           tools: {},
         },
         serverInfo: {
-          name: 'WordPress Trac',
+          name: tracDisplayName(instance),
           version: '1.0.0',
         },
       });
@@ -1214,7 +1457,10 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
       }
 
       try {
-        return toolResult(id, await executeStandardTool(parsed.data.name, parsed.data.arguments));
+        return toolResult(
+          id,
+          await executeStandardTool(instance, parsed.data.name, parsed.data.arguments)
+        );
       } catch (error) {
         if (error instanceof UnknownToolError || error instanceof z.ZodError) {
           return jsonRpcError(id, -32602, errorMessage(error));
@@ -1232,7 +1478,7 @@ export async function handleMcpRequest(request: JsonRpcRequest) {
  * Handle ChatGPT-specific MCP JSON-RPC 2.0 requests
  * Provides the search and fetch compatibility tools.
  */
-export async function handleChatGPTMcpRequest(request: JsonRpcRequest) {
+export async function handleChatGPTMcpRequest(instance: TracInstance, request: JsonRpcRequest) {
   const { method, params, id } = request;
   if (id === undefined) {
     return null;
@@ -1246,7 +1492,7 @@ export async function handleChatGPTMcpRequest(request: JsonRpcRequest) {
           tools: {},
         },
         serverInfo: {
-          name: 'WordPress Trac',
+          name: tracDisplayName(instance),
           version: '1.0.0',
         },
       });
@@ -1309,7 +1555,10 @@ Query Types:
       }
 
       try {
-        return toolResult(id, await executeChatGptTool(parsed.data.name, parsed.data.arguments));
+        return toolResult(
+          id,
+          await executeChatGptTool(instance, parsed.data.name, parsed.data.arguments)
+        );
       } catch (error) {
         if (error instanceof UnknownToolError || error instanceof z.ZodError) {
           return jsonRpcError(id, -32602, errorMessage(error));
@@ -1323,75 +1572,104 @@ Query Types:
   }
 }
 
-async function searchTicketsForChatGPT(query: string, limit: number) {
-  const search = await searchTracTickets(query, limit, 1);
+async function searchTicketsForChatGPT(instance: TracInstance, query: string, limit: number) {
+  const search = await searchTracTickets(instance, query, limit, 1);
   return {
     results: search.tickets.map((ticket) => ({
       id: ticket.id.toString(),
       title: `#${ticket.id}: ${ticket.summary}`,
       text: `Ticket #${ticket.id}: ${ticket.summary}\nStatus: ${ticket.status}\nType: ${ticket.type}\nPriority: ${ticket.priority}\nOwner: ${ticket.owner}\nMilestone: ${ticket.milestone}`,
-      url: `https://core.trac.wordpress.org/ticket/${ticket.id}`,
+      url: `${instance.origin}/ticket/${ticket.id}`,
       metadata: { ticket },
     })),
     totalFound: search.totalFound,
   };
 }
 
-async function getTicketForChatGPT(ticketId: number, includeComments: boolean) {
-  const ticketData = await fetchTicket(ticketId, includeComments);
-  return formatTicketResult(ticketData, includeComments, true);
+async function getTicketForChatGPT(
+  instance: TracInstance,
+  ticketId: number,
+  includeComments: boolean
+) {
+  const ticketData = await fetchTicket(instance, ticketId, includeComments);
+  return formatTicketResult(instance, ticketData, includeComments, true);
 }
 
-async function getChangesetForChatGPT(revision: number, includeDiff: boolean) {
-  const changeset = await fetchChangeset(revision, includeDiff);
-  return formatChangesetResult(changeset, true);
+async function getChangesetForChatGPT(
+  instance: TracInstance,
+  revision: number,
+  includeDiff: boolean
+) {
+  const changeset = await fetchChangeset(instance, revision, includeDiff);
+  return formatChangesetResult(instance, changeset, true);
 }
 
-async function getTimelineForChatGPT(days: number, limit: number) {
-  return { results: await fetchTimeline(days, limit) };
+async function getTimelineForChatGPT(instance: TracInstance, days: number, limit: number) {
+  return { results: await fetchTimeline(instance, days, limit) };
 }
 
-async function runChatGptSearch(query: string) {
+async function runChatGptSearch(instance: TracInstance, query: string) {
   const trimmed = query.trim();
+
+  /*
+   * A direct lookup that misses is an empty result rather than an error, but an
+   * instance that does not exist is a broken connection the caller must see.
+   */
+  const emptyResultForMiss = (error: unknown) => {
+    if (error instanceof UnknownTracInstanceError) {
+      throw error;
+    }
+    return { results: [], query, totalFound: 0 };
+  };
+
   if (/^#?\d+$/.test(trimmed)) {
     try {
       const ticket = await getTicketForChatGPT(
+        instance,
         Number.parseInt(trimmed.replace('#', ''), 10),
         false
       );
       return { results: [ticket], query, totalFound: 1 };
-    } catch {
-      return { results: [], query, totalFound: 0 };
+    } catch (error) {
+      return emptyResultForMiss(error);
     }
   }
   if (/^r\d+$/i.test(trimmed)) {
     try {
-      const changeset = await getChangesetForChatGPT(Number.parseInt(trimmed.slice(1), 10), false);
+      const changeset = await getChangesetForChatGPT(
+        instance,
+        Number.parseInt(trimmed.slice(1), 10),
+        false
+      );
       return { results: [changeset], query, totalFound: 1 };
-    } catch {
-      return { results: [], query, totalFound: 0 };
+    } catch (error) {
+      return emptyResultForMiss(error);
     }
   }
   if (/\b(recent|timeline|latest|activity)\b/i.test(trimmed)) {
-    const timeline = await getTimelineForChatGPT(7, 20);
+    const timeline = await getTimelineForChatGPT(instance, 7, 20);
     return { results: timeline.results, query, totalFound: timeline.results.length };
   }
 
-  const tickets = await searchTicketsForChatGPT(query, 10);
+  const tickets = await searchTicketsForChatGPT(instance, query, 10);
   return { results: tickets.results, query, totalFound: tickets.totalFound };
 }
 
-async function executeChatGptTool(name: string, input: unknown): Promise<unknown> {
+async function executeChatGptTool(
+  instance: TracInstance,
+  name: string,
+  input: unknown
+): Promise<unknown> {
   switch (name) {
     case 'search': {
       const { query } = ChatGptSearchArgsSchema.parse(input);
-      return runChatGptSearch(query);
+      return runChatGptSearch(instance, query);
     }
     case 'fetch': {
       const { id } = ChatGptFetchArgsSchema.parse(input);
       return id.startsWith('r')
-        ? getChangesetForChatGPT(Number.parseInt(id.slice(1), 10), true)
-        : getTicketForChatGPT(Number.parseInt(id, 10), true);
+        ? getChangesetForChatGPT(instance, Number.parseInt(id.slice(1), 10), true)
+        : getTicketForChatGPT(instance, Number.parseInt(id, 10), true);
     }
     default:
       throw new UnknownToolError(`Unknown tool: ${name}`);
@@ -1525,6 +1803,25 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
       text-decoration: underline;
     }
 
+    .instances {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+
+    .instances th,
+    .instances td {
+      text-align: left;
+      padding: 0.5rem 0.75rem 0.5rem 0;
+      border-bottom: 1px solid #e1e4e8;
+    }
+
+    .instances th {
+      color: #666;
+      font-weight: 600;
+    }
+
     .contribute {
       margin-top: 2rem;
       padding: 1.5rem;
@@ -1587,8 +1884,26 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
     <code>fetch</code> - Get detailed information about specific items
   </div>
   
+  <h2>Trac Instances</h2>
+  <p>Each WordPress.org Trac gets its own endpoint. Connect to the one you need; connect to several to use more than one.</p>
+  <table class="instances">
+    <thead>
+      <tr><th>Trac</th><th>Endpoint</th></tr>
+    </thead>
+    <tbody>
+${Object.keys(TRAC_LABELS)
+  .map((slug) => {
+    const instance = makeTracInstance(slug);
+    const endpoint = slug === 'core' ? '/mcp' : `/mcp/${slug}`;
+    return `      <tr><td><a href="${instance.origin}/">${instance.label}</a></td><td><code>${url.origin}${endpoint}</code></td></tr>`;
+  })
+  .join('\n')}
+    </tbody>
+  </table>
+  <p>Any other <code>&lt;slug&gt;.trac.wordpress.org</code> works the same way at <code>${url.origin}/mcp/&lt;slug&gt;</code>. Fields vary between instances: a Trac without severities or components reports them as unavailable rather than failing.</p>
+
   <h2>Configuration</h2>
-  
+
   <h3>Standard MCP (Claude Desktop, etc.)</h3>
   <div class="code-block">
     <code>{
@@ -1596,6 +1911,10 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
     "wordpress-trac": {
       "command": "npx",
       "args": ["mcp-remote", "${url.origin}/mcp"]
+    },
+    "wordpress-meta-trac": {
+      "command": "npx",
+      "args": ["mcp-remote", "${url.origin}/mcp/meta"]
     }
   }
 }</code>
@@ -1610,6 +1929,7 @@ function getLandingPage(url: URL, versionInfo?: { id: string; tag?: string; time
 3. Enable in Composer → Deep Research tool
 4. Add as research source if needed</code>
   </div>
+  <p>Other instances use <code>${url.origin}/mcp/&lt;slug&gt;/chatgpt</code>.</p>
   <p>See: <a href="https://platform.openai.com/docs/mcp#connect-in-chatgpt">ChatGPT MCP Documentation</a></p>
 
   <section class="contribute">
@@ -1651,7 +1971,40 @@ const MCP_CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, MCP-Protocol-Version',
 };
 
-async function handleMcpHttpRequest(request: Request, chatGpt: boolean): Promise<Response> {
+type McpRoute = {
+  instance: TracInstance;
+  chatGpt: boolean;
+};
+
+/**
+ * Resolve an MCP endpoint path to the Trac instance and tool set it addresses.
+ *
+ * Recognises /mcp, /mcp/chatgpt, /mcp/<slug>, and /mcp/<slug>/chatgpt, where the
+ * two slugless paths address core.
+ *
+ * @param pathname Request path.
+ * @return The matched route, or null when the path is not an MCP endpoint.
+ */
+export function matchMcpRoute(pathname: string): McpRoute | null {
+  const segments = pathname.split('/');
+  if (segments[1] !== 'mcp' || segments.length > 4) {
+    return null;
+  }
+  if (segments.length === 2) {
+    return { instance: CORE_TRAC, chatGpt: false };
+  }
+  if (segments.length === 3 && segments[2] === 'chatgpt') {
+    return { instance: CORE_TRAC, chatGpt: true };
+  }
+  if (segments.length === 4 && segments[3] !== 'chatgpt') {
+    return null;
+  }
+
+  const instance = tracInstance(segments[2] ?? '');
+  return instance ? { instance, chatGpt: segments.length === 4 } : null;
+}
+
+async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: MCP_CORS_HEADERS });
   }
@@ -1680,9 +2033,9 @@ async function handleMcpHttpRequest(request: Request, chatGpt: boolean): Promise
     });
   }
 
-  const response = chatGpt
-    ? await handleChatGPTMcpRequest(parsed.data)
-    : await handleMcpRequest(parsed.data);
+  const response = route.chatGpt
+    ? await handleChatGPTMcpRequest(route.instance, parsed.data)
+    : await handleMcpRequest(route.instance, parsed.data);
   if (response === null) {
     return new Response(null, { status: 202, headers: MCP_CORS_HEADERS });
   }
@@ -1787,8 +2140,14 @@ export default {
     }
 
     // Handle MCP endpoints
-    if (url.pathname === '/mcp' || url.pathname === '/mcp/chatgpt') {
-      return handleMcpHttpRequest(request, url.pathname === '/mcp/chatgpt');
+    const mcpRoute = matchMcpRoute(url.pathname);
+    if (mcpRoute) {
+      return handleMcpHttpRequest(mcpRoute, request);
+    }
+
+    // Own the whole /mcp namespace, so a preflight cannot succeed on a path that then 404s.
+    if (url.pathname.startsWith('/mcp/')) {
+      return new Response('Not found', { status: 404, headers: MCP_CORS_HEADERS });
     }
 
     // Handle CORS preflight
