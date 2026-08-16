@@ -5,6 +5,7 @@
 - `testing.md` is the canonical description of how this repository is tested: the automated gate CI runs, the manual smoke test, and what to do before a deployment.
 - `smoke-test.md` is that manual checklist as paste-ready commands with expected results.
 - `local-development.md` explains how to run the Worker locally and verify its browser-visible routes.
+- `timeline-pagination.md` is a decision record: why `getTimeline` reports the days it covered instead of page numbers. Read it before adding pagination to a tool that reads the timeline.
 
 `testing.md` and `smoke-test.md` are one document split by audience. `testing.md` explains the shape, `smoke-test.md` is what you actually run. Change one and check the other still agrees.
 

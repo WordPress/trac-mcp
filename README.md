@@ -31,7 +31,7 @@ The standard `/mcp` endpoint provides:
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
 | `getTicket` | Read a ticket, its attachments, changesets, recent human discussion, and linked pull requests |
 | `getChangeset` | Read a changeset and an optional truncated diff |
-| `getTimeline` | Read recent Trac activity |
+| `getTimeline` | Read Trac activity for recent days or a historical date range, with author filtering and day-granular coverage |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
 
 `getChangeset` expects the numeric `revision` argument, not `rev`:
@@ -60,6 +60,36 @@ ticket and an `r` prefix for a changeset: `65739` and `r58504`.
 
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
 separate argument overrides the same field in `query`. Results include pagination metadata.
+
+### Timeline ranges, authors, and coverage
+
+`getTimeline` reads the last `days` days (default 7, max 30) or an explicit `from`/`to` date range. Historical dates start at `2005-01-01`, the start of the verified WordPress Core Trac timeline used by this project, and may span at most 90 days per request because the upstream timeline caps its lookback. Dates are inclusive UTC calendar days: `days` counts whole days ending today, `from` on its own ends at today, and `to` on its own covers the seven days ending at `to`. A `to` in the future is rejected, and `days` cannot be combined with `from`/`to`:
+
+```json
+{
+  "from": "2005-01-01",
+  "to": "2005-01-31",
+  "author": "saxmatt",
+  "limit": 20
+}
+```
+
+`author` takes one Trac username or a list of up to ten. The server filters by author before the
+event limit applies, so a contributor's events stay complete even inside a busy window.
+
+Calls that use only `days` and `limit` keep the original recent-activity contract: `limit` is the maximum number of upstream events, and the response contains `results`, `totalEvents`, `daysBack`, and `timelineUrl`.
+
+For a date-range or author-filtered call, `limit` (1 to 100, default 20) is advisory. A response covers whole calendar days: results are rounded down to a day boundary, and the newest complete day of the window comes back in full even when it holds more events than `limit`.
+
+Each coverage response lists events newest first in `results` and reports `requested`, the window that was
+asked for, and `covered`, the part of it this response covers completely. `complete` says whether
+the response covered all of it. When it is `false`, `continueWith` is a ready-made arguments object
+for the remainder: it preserves the effective `limit` and the accepted `author` input when present,
+so send it back to `getTimeline` unchanged and repeat until a response reports `complete` as `true`,
+or until a response arrives without a `continueWith`. A continuation window always ends on a day already past, so walking one cannot produce gaps or duplicates. `note` states the coverage in plain language, and coverage that includes today is accurate as of the request. If one day fills the 500-event upstream fetch, that incomplete day is not included in `covered`: `covered` is `null`, `complete` is `false`, and `terminalTruncation` states that the tool cannot continue within that day.
+
+[docs/timeline-pagination.md](docs/timeline-pagination.md) records why the timeline reports day
+coverage instead of page numbers.
 
 ## Connect
 
