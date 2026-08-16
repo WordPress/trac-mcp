@@ -40,8 +40,6 @@ Argument names are easy to guess wrong. The real ones:
 
 `getTicket` takes `id`, not `ticketId`. `getTracInfo` takes `type`, not `infoType`. `getChangeset` takes `revision`, not `rev`.
 
-No tool takes a Trac instance argument. The endpoint path selects the instance, so `call /mcp ...` reads Core and `call /mcp/meta ...` reads Making WordPress.org. Sections 1 to 6 all run against Core; section 7 covers the other instances.
-
 ## 1. Transport surface
 
 ```bash

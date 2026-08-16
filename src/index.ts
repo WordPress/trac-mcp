@@ -117,6 +117,12 @@ export type TracInstance = {
   label: string;
 };
 
+/**
+ * Build an instance from a slug that has already been validated.
+ *
+ * @param slug Subdomain label of a *.trac.wordpress.org instance.
+ * @return The instance.
+ */
 function makeTracInstance(slug: string): TracInstance {
   return {
     slug,
@@ -187,10 +193,15 @@ async function isTransientTracResponse(response: Response): Promise<boolean> {
   return /Checking your browser/i.test(await response.clone().text());
 }
 
-/*
+/**
+ * Whether a response is a redirect that must not be followed.
+ *
  * The status range is what `redirect: 'manual'` produces. `redirected` cannot be
  * true alongside it and is kept as a backstop: a runtime that ignored the option
  * would hand back another instance's page, which is the one thing never to return.
+ *
+ * @param response Response to a request that asked not to follow redirects.
+ * @return True when the response redirects.
  */
 function isRedirect(response: Response): boolean {
   return response.redirected || (response.status >= 300 && response.status < 400);
@@ -593,6 +604,12 @@ function configuredTracFields(html: string): Set<string> | null {
 // Query parameters this server sets for itself; everything else it adds is a filter.
 const QUERY_CONTROL_PARAMS = new Set(['col', 'format', 'max', 'page']);
 
+/**
+ * Ticket fields a query URL filters on.
+ *
+ * @param url A Trac query URL this server built.
+ * @return The field names filtered on, without the parameters that shape the response.
+ */
 function ticketFilterFields(url: URL): string[] {
   return Array.from(new Set(url.searchParams.keys())).filter(
     (name) => !QUERY_CONTROL_PARAMS.has(name)
