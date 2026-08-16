@@ -711,11 +711,7 @@ async function fetchLinkedPullRequests(
   pullRequestsUrl.searchParams.set('trac', instance.slug);
   pullRequestsUrl.searchParams.set('ticket', ticketId.toString());
 
-  /*
-   * Redirects are followed here. This is one fixed host rather than a wildcard
-   * domain, so a redirect means it moved, and refusing to follow would turn
-   * that into every ticket silently reporting no linked pull requests.
-   */
+  // One fixed host rather than a wildcard domain, so a redirect means it moved: follow it.
   const response = await fetch(pullRequestsUrl.toString(), {
     headers: {
       'User-Agent': TRAC_USER_AGENT,
@@ -793,11 +789,7 @@ export async function searchTracTickets(
   const tickets = records.map(ticketFromRecord);
   const filterFields = ticketFilterFields(queryUrl);
   if (!totalResponse.ok) {
-    /*
-     * The count page carries the field list, so without it a filter cannot be
-     * told from one Trac dropped. Returning the rows anyway would present an
-     * unfiltered set as a filtered one, so a filtered search fails here.
-     */
+    // Without the field list, a filter Trac dropped cannot be told from one it applied.
     if (filterFields.length) {
       throw new Error(
         `Cannot confirm the ${filterFields.join(' and ')} filter against ${tracDisplayName(instance)} because its query page returned HTTP ${totalResponse.status}. Trac ignores a filter on a field it does not configure, so these results could be the whole ticket list.`
