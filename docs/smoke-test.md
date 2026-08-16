@@ -136,9 +136,9 @@ Every one of these returns a JSON-RPC error rather than a success envelope or a 
 
 Work through these in order before changing a parser.
 
-1. **Does the same check pass locally?** Run the list against `pnpm dev` on current `main`. If local passes and the deployment fails, the deployment is behind.
+1. **Does the same check pass locally?** Run the list against `pnpm dev` on current `trunk`. If local passes and the deployment fails, the deployment is behind.
 
-   To confirm that, compare behavior rather than version strings. Run `tools/list` against both and diff the advertised arguments: a deployment missing a field that `main` advertises is stale. The version on the landing page is Cloudflare's opaque Worker version ID, not a git commit, so it cannot be matched against a branch. Its deployment timestamp is the useful part, and the Cloudflare dashboard's deployment history maps that ID to what shipped.
+   To confirm that, compare behavior rather than version strings. Run `tools/list` against both and diff the advertised arguments: a deployment missing a field that `trunk` advertises is stale. The version on the landing page is Cloudflare's opaque Worker version ID, not a git commit, so it cannot be matched against a branch. Its deployment timestamp is the useful part, and the Cloudflare dashboard's deployment history maps that ID to what shipped.
 2. **Did Trac change, or did we?** Fetch the upstream URL by hand and look at the markup. Trac changing its HTML and our parser regressing produce the same symptom.
 3. **Is it the fixture?** These are real public tickets and their content can move. A ticket that gains its first attachment can turn a passing check into a failing one. Confirm the ticket still covers the case in the table above before treating it as a regression.
 
