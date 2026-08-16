@@ -902,6 +902,99 @@ describe('Trac instance routing', () => {
     ).rejects.toThrow('Unexpected redirect from https://meta.trac.wordpress.org: HTTP 302');
   });
 
+  it('fails a filtered search when the count page cannot confirm the field exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+        .mockResolvedValueOnce(new Response('Bad Request', { status: 400 }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { component: 'Widgets' } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('Cannot confirm the component filter');
+  });
+
+  it('still degrades gracefully when the count page fails and nothing was filtered', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+        .mockResolvedValueOnce(new Response('Bad Request', { status: 400 }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { limit: 5 } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').returned).toBe(1);
+  });
+
+  it('separates a field an instance lacks from one no ticket has a value for', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('id,milestone\n4,\n5,'))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTracInfo', arguments: { type: 'milestones' } },
+      },
+      '/mcp/gsoc'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.data).toEqual([]);
+    expect(result.text).toBe('No milestones found in Google Summer of Code Trac.');
+  });
+
+  it('follows a redirect from the linked pull request endpoint', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+        )
+      )
+      .mockResolvedValueOnce(Response.json([linkedPullRequestFixture()]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65808 } },
+    });
+
+    expect(fetchMock.mock.calls[2]?.[0]?.toString()).toContain('api.wordpress.org');
+    expect(fetchMock.mock.calls[2]?.[1]?.redirect).toBeUndefined();
+  });
+
   it('reports a field the routed instance does not configure as unavailable', async () => {
     vi.stubGlobal(
       'fetch',

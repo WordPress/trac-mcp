@@ -187,6 +187,11 @@ async function isTransientTracResponse(response: Response): Promise<boolean> {
   return /Checking your browser/i.test(await response.clone().text());
 }
 
+/*
+ * The status range is what `redirect: 'manual'` produces. `redirected` cannot be
+ * true alongside it and is kept as a backstop: a runtime that ignored the option
+ * would hand back another instance's page, which is the one thing never to return.
+ */
 function isRedirect(response: Response): boolean {
   return response.redirected || (response.status >= 300 && response.status < 400);
 }
@@ -689,16 +694,17 @@ async function fetchLinkedPullRequests(
   pullRequestsUrl.searchParams.set('trac', instance.slug);
   pullRequestsUrl.searchParams.set('ticket', ticketId.toString());
 
+  /*
+   * Redirects are followed here. This is one fixed host rather than a wildcard
+   * domain, so a redirect means it moved, and refusing to follow would turn
+   * that into every ticket silently reporting no linked pull requests.
+   */
   const response = await fetch(pullRequestsUrl.toString(), {
     headers: {
       'User-Agent': TRAC_USER_AGENT,
       Accept: 'application/json',
     },
-    redirect: 'manual',
   });
-  if (isRedirect(response)) {
-    throw new Error('Failed to fetch linked pull requests: unexpected redirect');
-  }
   if (!response.ok) {
     throw new Error(`Failed to fetch linked pull requests: ${response.statusText}`);
   }
@@ -768,7 +774,19 @@ export async function searchTracTickets(
     fetchTrac(instance, totalUrl, { headers: { 'User-Agent': TRAC_USER_AGENT } }),
   ]);
   const tickets = records.map(ticketFromRecord);
+  const filterFields = ticketFilterFields(queryUrl);
   if (!totalResponse.ok) {
+    /*
+     * The count page carries the field list, so without it a filter cannot be
+     * told from one Trac dropped. Returning the rows anyway would present an
+     * unfiltered set as a filtered one, so a filtered search fails here.
+     */
+    if (filterFields.length) {
+      throw new Error(
+        `Cannot confirm the ${filterFields.join(' and ')} filter against ${tracDisplayName(instance)} because its query page returned HTTP ${totalResponse.status}. Trac ignores a filter on a field it does not configure, so these results could be the whole ticket list.`
+      );
+    }
+
     return {
       tickets,
       totalFound: (pageNumber - 1) * pageSize + tickets.length,
@@ -784,7 +802,7 @@ export async function searchTracTickets(
   // The count page is a query page, so it carries the field list this filter has to exist in.
   const configured = configuredTracFields(totalHtml);
   if (configured) {
-    const unsupported = ticketFilterFields(queryUrl).filter((field) => !configured.has(field));
+    const unsupported = filterFields.filter((field) => !configured.has(field));
     if (unsupported.length) {
       throw new Error(
         `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
@@ -1038,7 +1056,7 @@ ${changeset.diff ? `Diff:\n${changeset.diff}` : 'No diff available'}`,
 async function fetchTracFieldOptions(
   instance: TracInstance,
   field: 'component' | 'severity'
-): Promise<string[]> {
+): Promise<TracInfoResult> {
   const queryUrl = new URL(`${instance.origin}/query`);
   queryUrl.searchParams.set(field, '');
   const response = await fetchTrac(instance, queryUrl, {
@@ -1055,7 +1073,7 @@ async function fetchTracFieldOptions(
     throw new Error(`Trac did not return ${field} options`);
   }
   if (!configured.has(field)) {
-    return [];
+    return { data: [], configured: false };
   }
 
   // The field exists here, so a missing option list is a parse failure rather than an answer.
@@ -1066,9 +1084,12 @@ async function fetchTracFieldOptions(
     throw new Error(`Trac did not return ${field} options`);
   }
 
-  return Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
-    cleanTracText(match[1] ?? '')
-  ).filter(Boolean);
+  return {
+    data: Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
+      cleanTracText(match[1] ?? '')
+    ).filter(Boolean),
+    configured: true,
+  };
 }
 
 type TracInfoType =
@@ -1079,7 +1100,14 @@ type TracInfoType =
   | 'types'
   | 'statuses';
 
-async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promise<string[]> {
+/*
+ * Whether the instance configures the field at all, which only the picker-backed
+ * types can answer. The rest read values off tickets, where an empty result means
+ * no ticket carried one rather than no such field.
+ */
+type TracInfoResult = { data: string[]; configured: boolean };
+
+async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promise<TracInfoResult> {
   if (type === 'components' || type === 'severities') {
     return fetchTracFieldOptions(instance, type === 'components' ? 'component' : 'severity');
   }
@@ -1099,7 +1127,7 @@ async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promis
   const values = (await fetchCsvRecords(instance, queryUrl))
     .map((record) => record[field]?.trim() ?? '')
     .filter(Boolean);
-  return Array.from(new Set(values)).sort();
+  return { data: Array.from(new Set(values)).sort(), configured: true };
 }
 
 async function fetchTimeline(instance: TracInstance, days: number, limit: number) {
@@ -1220,15 +1248,18 @@ async function executeStandardTool(
 
     case 'getTracInfo': {
       const { type } = GetTracInfoArgsSchema.parse(input);
-      const data = await fetchTracInfo(instance, type);
+      const { data, configured } = await fetchTracInfo(instance, type);
       const tracName = tracDisplayName(instance);
       const heading = type.charAt(0).toUpperCase() + type.slice(1);
+      const emptyText = configured
+        ? `No ${type} found in ${tracName}.`
+        : `${heading} are not available in ${tracName}.`;
       return {
         id: type,
         title: `${tracName} ${type}`,
         text: data.length
           ? `${heading} available in ${tracName}:\n\n${data.join('\n')}`
-          : `${heading} are not available in ${tracName}.`,
+          : emptyText,
         url: `${instance.origin}/`,
         metadata: { type, data, total: data.length },
       };
