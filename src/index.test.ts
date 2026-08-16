@@ -621,7 +621,7 @@ describe('Trac instance routing', () => {
         .fn<typeof fetch>()
         .mockResolvedValue(
           new Response(
-            '<html><body><select name="add_filter_0"></select><select name="0_severity"><option value="blocker">blocker</option><option value="normal">normal</option></select></body></html>'
+            '<html><body><select name="add_filter_0"><option value="severity">Severity</option></select><select class="trac-filter" name="0_severity"><option value="blocker">blocker</option><option value="normal">normal</option></select></body></html>'
           )
         )
     );
@@ -686,7 +686,12 @@ describe('Trac instance routing', () => {
     async (query) => {
       vi.stubGlobal(
         'fetch',
-        vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 301 }))
+        vi.fn<typeof fetch>().mockResolvedValue(
+          new Response(null, {
+            status: 301,
+            headers: { location: 'https://core.trac.wordpress.org/query' },
+          })
+        )
       );
 
       const response = await mcpRequest(
@@ -742,6 +747,159 @@ describe('Trac instance routing', () => {
 
       expect(response.status).toBe(404);
     }
+  });
+
+  it('refuses a search filtering on a field the routed instance does not configure', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<html><select name="add_filter_0"><option value="status">Status</option><option value="keywords">Keywords</option></select><span class="numrows">(149 matches)</span></html>'
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { component: 'Widgets' } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    const text = body.result.content.at(0)?.text ?? '';
+    expect(text).toContain('has no component field');
+    expect(text).toContain('keywords, status');
+  });
+
+  it('refuses a filter expression naming a field only other instances configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="component">Component</option><option value="status">Status</option></select><span class="numrows">(1117 matches)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { query: 'focuses~=accessibility' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('has no focuses field');
+  });
+
+  it('allows a search filtering on a field the routed instance does configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response('id,summary,component\n5483,A meta ticket,Plugin Directory')
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="component">Component</option></select><span class="numrows">(3 matches)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { component: 'Plugin Directory' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').totalFound).toBe(3);
+  });
+
+  it('fails rather than reporting a configured field as unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<html><select name="add_filter_0"><option value="component">Component</option></select><p>the option list moved</p></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTracInfo', arguments: { type: 'components' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('Trac did not return component options');
+  });
+
+  it('reads the option list whatever order Trac writes the select attributes in', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<html><select id="filter" name="add_filter_0"><option value="component">Component</option></select><select class="trac-filter" id="c" name="0_component"><option value="Editor">Editor</option></select></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTracInfo', arguments: { type: 'components' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').metadata.data).toEqual(['Editor']);
+  });
+
+  it('reports a redirect that stays on the instance as a redirect, not a missing instance', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://meta.trac.wordpress.org/maintenance' },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = tracInstance('meta');
+    if (!instance) {
+      throw new Error('meta should resolve');
+    }
+
+    await expect(
+      fetchTrac(instance, 'https://meta.trac.wordpress.org/timeline', undefined, [0])
+    ).rejects.toThrow('Unexpected redirect from https://meta.trac.wordpress.org: HTTP 302');
   });
 
   it('reports a field the routed instance does not configure as unavailable', async () => {

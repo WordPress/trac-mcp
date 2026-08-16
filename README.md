@@ -46,6 +46,11 @@ severities. `getTracInfo` reports a field the instance does not configure as una
 failing. Ticket fields behave the same way: `focuses` exists only on Core and comes back empty
 elsewhere.
 
+Filtering is stricter, because Trac answers a filter on a field it does not configure with the
+unfiltered result set rather than an error, and that reads as a real match count. `searchTickets`
+rejects such a filter and names the fields the instance does have. This covers both the separate
+arguments and the expressions inside `query`.
+
 Connect to one instance per client entry. Use several entries to read several Tracs.
 
 ## Tools

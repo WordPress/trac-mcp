@@ -191,6 +191,42 @@ function isRedirect(response: Response): boolean {
   return response.redirected || (response.status >= 300 && response.status < 400);
 }
 
+/**
+ * Origin a redirect response points at.
+ *
+ * @param response A redirect response.
+ * @param requestUrl URL the response answers, used to resolve a relative target.
+ * @return The target origin, or null when there is no usable Location header.
+ */
+function redirectOrigin(response: Response, requestUrl: URL): string | null {
+  const location = response.headers.get('location');
+  if (!location) {
+    return null;
+  }
+
+  try {
+    return new URL(location, requestUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Failure to report for a redirect, which is never followed.
+ *
+ * @param instance Instance the request addressed.
+ * @param response The redirect response.
+ * @param requestUrl URL the response answers.
+ * @return The error to throw.
+ */
+function redirectError(instance: TracInstance, response: Response, requestUrl: URL): Error {
+  // A slug with no Trac behind it redirects off-origin; one that stays put is something else.
+  const target = redirectOrigin(response, requestUrl);
+  return target && target !== instance.origin
+    ? new UnknownTracInstanceError(`Unknown or unavailable Trac instance: ${instance.slug}`)
+    : new Error(`Unexpected redirect from ${instance.origin}: HTTP ${response.status}`);
+}
+
 export async function fetchTrac(
   instance: TracInstance,
   input: string | URL,
@@ -205,7 +241,7 @@ export async function fetchTrac(
   for (let attempt = 0; ; attempt++) {
     let response: Response;
     try {
-      // Unknown subdomains redirect to core, so following one would answer with another instance's data.
+      // Never follow a redirect: unknown subdomains point at core, whose data is not ours to return.
       response = await fetch(url.toString(), { ...init, redirect: 'manual' });
     } catch (error) {
       if (attempt >= retryDelays.length) {
@@ -216,7 +252,7 @@ export async function fetchTrac(
     }
 
     if (isRedirect(response)) {
-      throw new UnknownTracInstanceError(`Unknown or unavailable Trac instance: ${instance.slug}`);
+      throw redirectError(instance, response, url);
     }
     if (!(await isTransientTracResponse(response)) || attempt >= retryDelays.length) {
       return response;
@@ -525,6 +561,39 @@ export function parseCsvRecords(csvData: string): TracRecord[] {
   });
 }
 
+/**
+ * Ticket fields an instance configures, read from the filter picker on a query page.
+ *
+ * Instances differ: themes has no component, and only some have severity. Trac
+ * drops a filter on a field it does not configure instead of rejecting it, so
+ * this list is what separates an unsupported filter from a matching one.
+ *
+ * @param html A Trac query page.
+ * @return The configured field names, or null when the page is not a query page.
+ */
+function configuredTracFields(html: string): Set<string> | null {
+  const picker = html.match(/<select[^>]*\bname="add_filter_0"[^>]*>([\s\S]*?)<\/select>/i)?.[1];
+  if (picker === undefined) {
+    return null;
+  }
+
+  return new Set(
+    Array.from(
+      picker.matchAll(/<option[^>]*\bvalue="([^"]+)"/gi),
+      (match) => match[1] ?? ''
+    ).filter(Boolean)
+  );
+}
+
+// Query parameters this server sets for itself; everything else it adds is a filter.
+const QUERY_CONTROL_PARAMS = new Set(['col', 'format', 'max', 'page']);
+
+function ticketFilterFields(url: URL): string[] {
+  return Array.from(new Set(url.searchParams.keys())).filter(
+    (name) => !QUERY_CONTROL_PARAMS.has(name)
+  );
+}
+
 function addColumns(url: URL, columns: readonly string[]): void {
   for (const column of columns) {
     url.searchParams.append('col', column);
@@ -711,6 +780,18 @@ export async function searchTracTickets(
   }
 
   const totalHtml = await totalResponse.text();
+
+  // The count page is a query page, so it carries the field list this filter has to exist in.
+  const configured = configuredTracFields(totalHtml);
+  if (configured) {
+    const unsupported = ticketFilterFields(queryUrl).filter((field) => !configured.has(field));
+    if (unsupported.length) {
+      throw new Error(
+        `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
+      );
+    }
+  }
+
   const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
   if (!totalMatch?.[1]) {
     throw new Error('Trac did not return the total ticket count');
@@ -969,15 +1050,20 @@ async function fetchTracFieldOptions(
   }
 
   const html = await response.text();
+  const configured = configuredTracFields(html);
+  if (!configured) {
+    throw new Error(`Trac did not return ${field} options`);
+  }
+  if (!configured.has(field)) {
+    return [];
+  }
+
+  // The field exists here, so a missing option list is a parse failure rather than an answer.
   const select = html.match(
-    new RegExp(`<select\\s+name="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
+    new RegExp(`<select[^>]*\\bname="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
   )?.[1];
   if (!select) {
-    // The filter picker renders on every query page, so its absence means this is not one.
-    if (!/<select\s+name="add_filter_0"/i.test(html)) {
-      throw new Error(`Trac did not return ${field} options`);
-    }
-    return [];
+    throw new Error(`Trac did not return ${field} options`);
   }
 
   return Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>

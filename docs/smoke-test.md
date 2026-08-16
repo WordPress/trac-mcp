@@ -181,6 +181,17 @@ call /mcp        getTracInfo '{"type":"severities"}'
 
 Meta has no severities and Themes has no components. Both return `Severities are not available in ...` / `Components are not available in ...` with `metadata.total` of `0`, and neither is a tool error. Core still returns the populated list, which is the control: an empty answer there means the query page markup changed and the parser broke.
 
+Filtering on such a field is a tool error rather than an unavailable answer:
+
+```bash
+call /mcp/themes searchTickets '{"component":"Widgets","limit":2}'
+call /mcp/meta   searchTickets '{"query":"focuses~=accessibility","limit":2}'
+call /mcp/meta   searchTickets '{"component":"Plugin Directory","limit":2}'
+call /mcp        searchTickets '{"component":"Widgets","limit":2}'
+```
+
+The first two fail with `has no component field` / `has no focuses field` and list the fields that instance does have. The last two succeed, because Meta configures components and Core configures both. The difference matters: Trac answers a filter on a field it does not configure with the whole ticket set and a matching `totalFound`, so a passing-looking result here is the bug, not the error.
+
 ### Unknown instances
 
 ```bash
