@@ -598,6 +598,25 @@ describe('Trac instance routing', () => {
     expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe('manual');
   });
 
+  /*
+   * A redirect only proves the instance is missing when it names a target off the
+   * instance origin. Without a usable Location there is nothing to compare, so the
+   * failure has to stay generic rather than claim the Trac does not exist.
+   */
+  it('reports a redirect with no Location header as an upstream failure', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 301 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = tracInstance('xyzzy-nope');
+    if (!instance) {
+      throw new Error('A well-formed slug should resolve regardless of whether the Trac exists');
+    }
+
+    await expect(
+      fetchTrac(instance, 'https://xyzzy-nope.trac.wordpress.org/timeline', undefined, [0, 0])
+    ).rejects.toThrow('Unexpected redirect from https://xyzzy-nope.trac.wordpress.org: HTTP 301');
+  });
+
   it('serves core under its own name at both slugless endpoints', async () => {
     for (const path of ['/mcp', '/mcp/chatgpt']) {
       const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, path);
@@ -608,7 +627,7 @@ describe('Trac instance routing', () => {
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'WordPress Trac', version: '1.0.0' },
+          serverInfo: { name: 'WordPress Trac', version: '1.1.0' },
         },
       });
     }

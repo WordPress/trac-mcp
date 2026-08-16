@@ -169,7 +169,8 @@ pnpm run deploy:production
   pattern before it reaches a request, and every request is checked against the resolved origin.
 - Upstream redirects are never followed. `*.trac.wordpress.org` has wildcard DNS and redirects
   unknown subdomains to Core, so following one would answer for one instance with another's data.
-  A redirect is reported as an unknown instance instead.
+  A redirect that leaves the instance origin is reported as an unknown instance; one that stays on
+  it is reported as an upstream failure.
 - Transient transport failures, rate limits, server errors, and Trac bot challenges receive bounded
   retries. Permanent 403 and 404 responses return immediately.
 - Responses are parsed from public Trac pages and machine-readable formats.
