@@ -17,6 +17,8 @@ This includes:
 
 Tests mock Trac responses. They should not depend on Trac availability or mutable ticket content.
 
+Mocked tests cannot see the one failure that matters most for multiple instances: `*.trac.wordpress.org` redirects unknown subdomains to Core, so a server that follows redirects answers for the wrong Trac while every mocked test passes. The automated suite pins the guard against that, and step 10 of the smoke test confirms it against the live domain.
+
 ## Manual smoke test
 
 Start the Worker by following [local-development.md](local-development.md), then use harmless public ticket and changeset IDs. See [smoke-test.md](smoke-test.md) for the same list as runnable commands with expected results.
@@ -36,6 +38,9 @@ Start the Worker by following [local-development.md](local-development.md), then
 5. Check search page 1 and a page beyond the final result; the latter should return an empty page.
 6. Initialize `/mcp/chatgpt`, then search a keyword, ticket `65739`, and changeset `r58504`.
 7. Send invalid arguments and confirm the response is a JSON-RPC invalid-params error.
+8. Exercise a non-Core instance at `/mcp/meta` and `/mcp/meta/chatgpt`. Every URL in a result must point at `meta.trac.wordpress.org`; a `core.trac.wordpress.org` URL means the instance was not threaded through.
+9. Ask an instance for a field it does not configure, such as severities on `/mcp/meta`. Expect an "are not available" answer rather than a tool error, and confirm Core still returns its populated list.
+10. Call a tool on a slug with no Trac behind it, such as `/mcp/xyzzy-nope`. Expect `Unknown or unavailable Trac instance`. Core data here is a security regression: the domain redirects unknown subdomains to Core, so a server that follows redirects fails this check while looking healthy.
 
 Do not paste private ticket data or credentials into fixtures. If live checks fail, distinguish a Trac response change from Worker behavior before changing a parser.
 

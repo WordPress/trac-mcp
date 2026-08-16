@@ -40,6 +40,8 @@ Argument names are easy to guess wrong. The real ones:
 
 `getTicket` takes `id`, not `ticketId`. `getTracInfo` takes `type`, not `infoType`. `getChangeset` takes `revision`, not `rev`.
 
+No tool takes a Trac instance argument. The endpoint path selects the instance, so `call /mcp ...` reads Core and `call /mcp/meta ...` reads Making WordPress.org. Sections 1 to 6 all run against Core; section 7 covers the other instances.
+
 ## 1. Transport surface
 
 ```bash
@@ -131,6 +133,75 @@ call /mcp getTracInfo '{}'
 ```
 
 Every one of these returns a JSON-RPC error rather than a success envelope or a crash. Bad arguments come back as `-32602` invalid params with the failing field named. A malformed request that returns `200` with empty content is a bug.
+
+## 7. Other Trac instances
+
+Each instance is a separate endpoint. These fixtures live on Meta rather than Core:
+
+| Fixture | Covers |
+| --- | --- |
+| `meta` `5483` | Ticket with comments on a non-Core instance |
+| `meta` `r14000` | Changeset on a non-Core instance |
+| `meta` `severities` | A field the instance does not configure |
+| `themes` `components` | A second, differently shaped missing field |
+| `xyzzy-nope` | A slug that resolves but has no Trac behind it |
+
+Confirm one non-Core instance end to end:
+
+```bash
+rpc  /mcp/meta '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+call /mcp/meta searchTickets '{"query":"plugin","limit":2}'
+call /mcp/meta getTicket '{"id":5483,"includeComments":true,"commentLimit":2}'
+call /mcp/meta getChangeset '{"revision":14000,"includeDiff":false}'
+call /mcp/meta getTimeline '{"days":7,"limit":3}'
+call /mcp/meta getTracInfo '{"type":"components"}'
+call /mcp/meta/chatgpt search '{"query":"5483"}'
+call /mcp/meta/chatgpt fetch '{"id":"r14000"}'
+```
+
+`initialize` names the instance: `Making WordPress.org Trac` rather than `WordPress Trac`. Every `url` in a result points at `meta.trac.wordpress.org`. A result carrying a `core.trac.wordpress.org` URL means the instance was not threaded through, which is the failure this section exists to catch.
+
+Then confirm the rest still answer:
+
+```bash
+for slug in themes plugins bbpress buddypress glotpress gsoc; do
+  echo "== $slug"; call "/mcp/$slug" searchTickets '{"limit":1}'
+done
+```
+
+Each returns tickets whose `url` matches its own instance. Instances differ in size and in which fields they configure, so judge these on the request succeeding and the host being right rather than on the counts.
+
+### Fields an instance does not have
+
+```bash
+call /mcp/meta   getTracInfo '{"type":"severities"}'
+call /mcp/themes getTracInfo '{"type":"components"}'
+call /mcp        getTracInfo '{"type":"severities"}'
+```
+
+Meta has no severities and Themes has no components. Both return `Severities are not available in ...` / `Components are not available in ...` with `metadata.total` of `0`, and neither is a tool error. Core still returns the populated list, which is the control: an empty answer there means the query page markup changed and the parser broke.
+
+### Unknown instances
+
+```bash
+call /mcp/xyzzy-nope getTicket '{"id":65739}'
+call /mcp/xyzzy-nope searchTickets '{"query":"editor","limit":1}'
+```
+
+Both return a tool error reading `Unknown or unavailable Trac instance: xyzzy-nope`.
+
+This is the most important check in this section. `*.trac.wordpress.org` has wildcard DNS and redirects every unknown subdomain to Core, so a server that follows redirects answers these with Core's ticket 65739 and a populated search, looking entirely healthy. Core data here is a security regression, not a cosmetic one.
+
+### Rejected paths
+
+```bash
+for p in /mcp/ /mcp/Meta /mcp/meta/ /mcp/meta/tools /mcp/chatgpt/chatgpt; do
+  printf '%-22s %s\n' "$p" "$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE$p" \
+    -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"ping"}')"
+done
+```
+
+All five return `404`. Slugs are lowercase, so `/mcp/Meta` is rejected rather than folded to `/mcp/meta`. `chatgpt` is a route keyword rather than an instance, so `/mcp/chatgpt` stays Core's compatibility endpoint and `/mcp/chatgpt/chatgpt` resolves to nothing.
 
 ## Reading a failure
 
