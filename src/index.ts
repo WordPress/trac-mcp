@@ -2145,11 +2145,7 @@ export default {
       return handleMcpHttpRequest(mcpRoute, request);
     }
 
-    /*
-     * Answer the whole /mcp namespace here so an unroutable instance returns 404
-     * to every method, rather than letting a preflight fall through to the
-     * catch-all below and succeed for a path that cannot serve the request.
-     */
+    // Own the whole /mcp namespace, so a preflight cannot succeed on a path that then 404s.
     if (url.pathname.startsWith('/mcp/')) {
       return new Response('Not found', { status: 404, headers: MCP_CORS_HEADERS });
     }
