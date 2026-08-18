@@ -1,7 +1,7 @@
 {
   "name": "wordpress-trac-mcp-server",
-  "version": "1.0.0",
-  "description": "Read-only Model Context Protocol server for WordPress Core Trac",
+  "version": "1.1.0",
+  "description": "Read-only Model Context Protocol server for WordPress Trac",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {

@@ -1,8 +1,8 @@
 # WordPress Trac MCP server
 
-A read-only [Model Context Protocol](https://modelcontextprotocol.io/) server for
-[WordPress Core Trac](https://core.trac.wordpress.org/). It runs as a Cloudflare Worker and uses
-Trac's public HTML, CSV, RSS, and diff endpoints.
+A read-only [Model Context Protocol](https://modelcontextprotocol.io/) server for the WordPress.org
+Trac instances, starting with [WordPress Core Trac](https://core.trac.wordpress.org/). It runs as a
+Cloudflare Worker and uses Trac's public HTML, CSV, RSS, and diff endpoints.
 
 Live servers:
 
@@ -21,6 +21,37 @@ Staging:
 The former staging deployment at `https://mcp-server-wporg-trac-staging.a8cai.workers.dev` is
 deprecated and runs older code. Its `a8cai.workers.dev` subdomain differs from the active staging
 deployment's `a8c-aiops.workers.dev` subdomain.
+
+## Trac instances
+
+Each Trac instance has its own endpoint. `/mcp` and `/mcp/chatgpt` serve Core.
+
+| Trac | Standard MCP | Search/fetch compatibility |
+| --- | --- | --- |
+| [WordPress Core](https://core.trac.wordpress.org/) | `/mcp` | `/mcp/chatgpt` |
+| [Making WordPress.org](https://meta.trac.wordpress.org/) | `/mcp/meta` | `/mcp/meta/chatgpt` |
+| [Themes](https://themes.trac.wordpress.org/) | `/mcp/themes` | `/mcp/themes/chatgpt` |
+| [Plugins](https://plugins.trac.wordpress.org/) | `/mcp/plugins` | `/mcp/plugins/chatgpt` |
+| [bbPress](https://bbpress.trac.wordpress.org/) | `/mcp/bbpress` | `/mcp/bbpress/chatgpt` |
+| [BuddyPress](https://buddypress.trac.wordpress.org/) | `/mcp/buddypress` | `/mcp/buddypress/chatgpt` |
+| [GlotPress](https://glotpress.trac.wordpress.org/) | `/mcp/glotpress` | `/mcp/glotpress/chatgpt` |
+| [Google Summer of Code](https://gsoc.trac.wordpress.org/) | `/mcp/gsoc` | `/mcp/gsoc/chatgpt` |
+
+The table is a discovery aid rather than an allowlist. Any `<slug>.trac.wordpress.org` resolves at
+`/mcp/<slug>`, so a Trac added later needs no change here. An instance is bound to the connection
+rather than chosen per tool call, so a client cannot read the wrong Trac by mistake.
+
+Instances configure different fields. Themes has no components, and only some instances have
+severities. `getTracInfo` reports a field the instance does not configure as unavailable instead of
+failing. Ticket fields behave the same way: `focuses` exists only on Core and comes back empty
+elsewhere.
+
+Filtering is stricter, because Trac answers a filter on a field it does not configure with the
+unfiltered result set rather than an error, and that reads as a real match count. `searchTickets`
+rejects such a filter and names the fields the instance does have. This covers both the separate
+arguments and the expressions inside `query`.
+
+Connect to one instance per client entry. Use several entries to read several Tracs.
 
 ## Tools
 
@@ -45,6 +76,9 @@ The standard `/mcp` endpoint provides:
 
 The `/mcp/chatgpt` compatibility endpoint provides `search` and `fetch`. Use a bare number for a
 ticket and an `r` prefix for a changeset: `65739` and `r58504`.
+
+No tool takes a Trac instance argument. The endpoint you connect to decides which Trac the tools
+read.
 
 ### Search filters
 
@@ -104,6 +138,13 @@ bridge can use `mcp-remote`:
         "mcp-remote",
         "https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp"
       ]
+    },
+    "wordpress-meta-trac": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/mcp/meta"
+      ]
     }
   }
 }
@@ -152,8 +193,13 @@ pnpm run deploy:production
 
 - The server is read-only and has no Trac credentials.
 - Tool inputs receive runtime validation before any upstream request.
-- Upstream requests use the fixed `core.trac.wordpress.org` host and the official linked-PR
-  endpoint on `api.wordpress.org`.
+- Upstream requests stay on `*.trac.wordpress.org` and the official linked-PR endpoint on
+  `api.wordpress.org`. The instance slug comes from the URL path, is validated against a strict
+  pattern before it reaches a request, and every request is checked against the resolved origin.
+- Upstream redirects are never followed. `*.trac.wordpress.org` has wildcard DNS and redirects
+  unknown subdomains to Core, so following one would answer for one instance with another's data.
+  A redirect that leaves the instance origin is reported as an unknown instance; one that stays on
+  it is reported as an upstream failure.
 - Transient transport failures, rate limits, server errors, and Trac bot challenges receive bounded
   retries. Permanent 403 and 404 responses return immediately.
 - Responses are parsed from public Trac pages and machine-readable formats.

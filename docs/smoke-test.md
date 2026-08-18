@@ -143,13 +143,93 @@ call /mcp searchTickets '{"query":"bogusfield~=value"}'
 
 The missing ticket and changeset each return `"code": "not_found"` with `resource` and `id` naming what was requested, for example `{"code": "not_found", "error": "Ticket 99999999 not found", "resource": "ticket", "id": 99999999}`. The unsupported filter field returns `"code": "invalid_argument"`. The full code set and its stability guarantee are documented in the README under "Tool errors".
 
+## 7. Other Trac instances
+
+Each instance is a separate endpoint. These fixtures live on Meta rather than Core:
+
+| Fixture | Covers |
+| --- | --- |
+| `meta` `5483` | Ticket with comments on a non-Core instance |
+| `meta` `r14000` | Changeset on a non-Core instance |
+| `meta` `severities` | A field the instance does not configure |
+| `themes` `components` | A second, differently shaped missing field |
+| `xyzzy-nope` | A slug that resolves but has no Trac behind it |
+
+Confirm one non-Core instance end to end:
+
+```bash
+rpc  /mcp/meta '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+call /mcp/meta searchTickets '{"query":"plugin","limit":2}'
+call /mcp/meta getTicket '{"id":5483,"includeComments":true,"commentLimit":2}'
+call /mcp/meta getChangeset '{"revision":14000,"includeDiff":false}'
+call /mcp/meta getTimeline '{"days":7,"limit":3}'
+call /mcp/meta getTracInfo '{"type":"components"}'
+call /mcp/meta/chatgpt search '{"query":"5483"}'
+call /mcp/meta/chatgpt fetch '{"id":"r14000"}'
+```
+
+`initialize` names the instance: `Making WordPress.org Trac` rather than `WordPress Trac`. Every `url` in a result points at `meta.trac.wordpress.org`. A result carrying a `core.trac.wordpress.org` URL means the instance was not threaded through, which is the failure this section exists to catch.
+
+Then confirm the rest still answer:
+
+```bash
+for slug in themes plugins bbpress buddypress glotpress gsoc; do
+  echo "== $slug"; call "/mcp/$slug" searchTickets '{"limit":1}'
+done
+```
+
+Each returns tickets whose `url` matches its own instance. Instances differ in size and in which fields they configure, so judge these on the request succeeding and the host being right rather than on the counts.
+
+### Fields an instance does not have
+
+```bash
+call /mcp/meta   getTracInfo '{"type":"severities"}'
+call /mcp/themes getTracInfo '{"type":"components"}'
+call /mcp        getTracInfo '{"type":"severities"}'
+```
+
+Meta has no severities and Themes has no components. Both return `Severities are not available in ...` / `Components are not available in ...` with `metadata.total` of `0`, and neither is a tool error. Core still returns the populated list, which is the control: an empty answer there means the query page markup changed and the parser broke.
+
+Filtering on such a field is a tool error rather than an unavailable answer:
+
+```bash
+call /mcp/themes searchTickets '{"component":"Widgets","limit":2}'
+call /mcp/meta   searchTickets '{"query":"focuses~=accessibility","limit":2}'
+call /mcp/meta   searchTickets '{"component":"Plugin Directory","limit":2}'
+call /mcp        searchTickets '{"component":"Widgets","limit":2}'
+```
+
+The first two fail with `has no component field` / `has no focuses field` and list the fields that instance does have. The last two succeed, because Meta configures components and Core configures both. The difference matters: Trac answers a filter on a field it does not configure with the whole ticket set and a matching `totalFound`, so a passing-looking result here is the bug, not the error.
+
+### Unknown instances
+
+```bash
+call /mcp/xyzzy-nope getTicket '{"id":65739}'
+call /mcp/xyzzy-nope searchTickets '{"query":"editor","limit":1}'
+```
+
+Both return a tool error reading `Unknown or unavailable Trac instance: xyzzy-nope`.
+
+This is the most important check in this section. `*.trac.wordpress.org` has wildcard DNS and redirects every unknown subdomain to Core, so a server that follows redirects answers these with Core's ticket 65739 and a populated search, looking entirely healthy. Core data here is a security regression, not a cosmetic one.
+
+### Rejected paths
+
+```bash
+for p in /mcp/ /mcp/Meta /mcp/meta/ /mcp/meta/tools /mcp/chatgpt/chatgpt; do
+  printf '%-22s %s\n' "$p" "$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE$p" \
+    -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"ping"}')"
+done
+```
+
+All five return `404`. Slugs are lowercase, so `/mcp/Meta` is rejected rather than folded to `/mcp/meta`. `chatgpt` is a route keyword rather than an instance, so `/mcp/chatgpt` stays Core's compatibility endpoint and `/mcp/chatgpt/chatgpt` resolves to nothing.
+
 ## Reading a failure
 
 Work through these in order before changing a parser.
 
-1. **Does the same check pass locally?** Run the list against `pnpm dev` on current `main`. If local passes and the deployment fails, the deployment is behind.
+1. **Does the same check pass locally?** Run the list against `pnpm dev` on current `trunk`. If local passes and the deployment fails, the deployment is behind.
 
-   To confirm that, compare behavior rather than version strings. Run `tools/list` against both and diff the advertised arguments: a deployment missing a field that `main` advertises is stale. The version on the landing page is Cloudflare's opaque Worker version ID, not a git commit, so it cannot be matched against a branch. Its deployment timestamp is the useful part, and the Cloudflare dashboard's deployment history maps that ID to what shipped.
+   To confirm that, compare behavior rather than version strings. Run `tools/list` against both and diff the advertised arguments: a deployment missing a field that `trunk` advertises is stale. The version on the landing page is Cloudflare's opaque Worker version ID, not a git commit, so it cannot be matched against a branch. Its deployment timestamp is the useful part, and the Cloudflare dashboard's deployment history maps that ID to what shipped.
 2. **Did Trac change, or did we?** Fetch the upstream URL by hand and look at the markup. Trac changing its HTML and our parser regressing produce the same symptom.
 3. **Is it the fixture?** These are real public tickets and their content can move. A ticket that gains its first attachment can turn a passing check into a failing one. Confirm the ticket still covers the case in the table above before treating it as a regression.
 
