@@ -38,11 +38,12 @@ Start the Worker by following [local-development.md](local-development.md), then
 5. Check search page 1 and a page beyond the final result; the latter should return an empty page.
 6. Initialize `/mcp/chatgpt`, then search a keyword, ticket `65739`, and changeset `r58504`.
 7. Send invalid arguments and confirm the response is a JSON-RPC invalid-params error.
-8. Exercise a non-Core instance at `/mcp/meta` and `/mcp/meta/chatgpt`. Every URL in a result must point at `meta.trac.wordpress.org`; a `core.trac.wordpress.org` URL means the instance was not threaded through.
-9. Ask an instance for a field it does not configure, such as severities on `/mcp/meta`. Expect an "are not available" answer rather than a tool error, and confirm Core still returns its populated list.
-10. Call a tool on a slug with no Trac behind it, such as `/mcp/xyzzy-nope`. Expect `Unknown or unavailable Trac instance`. Core data here is a security regression: the domain redirects unknown subdomains to Core, so a server that follows redirects fails this check while looking healthy.
-11. Filter a search on a field the instance does not configure, such as a component on `/mcp/themes`. Expect a tool error naming the fields that instance does have, and confirm the same filter still succeeds where the field exists. A passing-looking result is the failure here: Trac answers an unconfigured filter with the whole ticket set and a matching count.
-12. Send a malformed instance path, such as `/mcp/`, `/mcp/Meta`, `/mcp/meta/`, `/mcp/meta/tools`, or `/mcp/chatgpt/chatgpt`. Each returns `404`. Slugs are lowercase, and `chatgpt` is a route keyword rather than an instance.
+8. Request ticket `99999999` and changeset `99999999`; confirm each returns a tool error whose payload carries `"code": "not_found"` with the resource and ID named. Search with an unsupported filter field and confirm `"code": "invalid_argument"`.
+9. Exercise a non-Core instance at `/mcp/meta` and `/mcp/meta/chatgpt`. Every URL in a result must point at `meta.trac.wordpress.org`; a `core.trac.wordpress.org` URL means the instance was not threaded through.
+10. Ask an instance for a field it does not configure, such as severities on `/mcp/meta`. Expect an "are not available" answer rather than a tool error, and confirm Core still returns its populated list.
+11. Call a tool on a slug with no Trac behind it, such as `/mcp/xyzzy-nope`. Expect `Unknown or unavailable Trac instance`. Core data here is a security regression: the domain redirects unknown subdomains to Core, so a server that follows redirects fails this check while looking healthy.
+12. Filter a search on a field the instance does not configure, such as a component on `/mcp/themes`. Expect a tool error naming the fields that instance does have, and confirm the same filter still succeeds where the field exists. A passing-looking result is the failure here: Trac answers an unconfigured filter with the whole ticket set and a matching count.
+13. Send a malformed instance path, such as `/mcp/`, `/mcp/Meta`, `/mcp/meta/`, `/mcp/meta/tools`, or `/mcp/chatgpt/chatgpt`. Each returns `404`. Slugs are lowercase, and `chatgpt` is a route keyword rather than an instance.
 
 Do not paste private ticket data or credentials into fixtures. If live checks fail, distinguish a Trac response change from Worker behavior before changing a parser.
 

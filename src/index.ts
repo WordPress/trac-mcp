@@ -78,6 +78,29 @@ const LinkedPullRequestSchema = z.object({
 
 class UnknownToolError extends Error {}
 
+// Stable, machine-readable tool error codes. These are API surface documented in the README:
+// consumers branch on them, so codes only change with a version bump. Messages can change freely.
+type ToolErrorCode = 'not_found' | 'invalid_argument' | 'rate_limited' | 'upstream_error';
+
+class ToolError extends Error {
+  readonly code: ToolErrorCode;
+  readonly details: { resource?: 'ticket' | 'changeset'; id?: number };
+
+  constructor(code: ToolErrorCode, message: string, details: ToolError['details'] = {}) {
+    super(message);
+    this.name = 'ToolError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function upstreamHttpError(
+  response: Response,
+  message = `HTTP ${response.status}: ${response.statusText}`
+): ToolError {
+  return new ToolError(response.status === 429 ? 'rate_limited' : 'upstream_error', message);
+}
+
 /*
  * Distinct from an ordinary upstream failure so callers that turn "not found"
  * into an empty result do not also swallow a Trac that does not exist.
@@ -625,7 +648,7 @@ function addColumns(url: URL, columns: readonly string[]): void {
 export function parseTicketFilter(expression: string): [string, string] {
   const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
-    throw new Error(`Invalid ticket filter expression: ${expression}`);
+    throw new ToolError('invalid_argument', `Invalid ticket filter expression: ${expression}`);
   }
 
   const field = match[1].toLowerCase();
@@ -633,7 +656,7 @@ export function parseTicketFilter(expression: string): [string, string] {
     !TICKET_COLUMNS.includes(field as (typeof TICKET_COLUMNS)[number]) &&
     field !== 'description'
   ) {
-    throw new Error(`Unsupported ticket filter: ${field}`);
+    throw new ToolError('invalid_argument', `Unsupported ticket filter: ${field}`);
   }
 
   return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
@@ -672,12 +695,12 @@ async function fetchCsvRecords(instance: TracInstance, url: URL): Promise<TracRe
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    throw upstreamHttpError(response);
   }
 
   const csvData = await response.text();
   if (/<!doctype html|<html/i.test(csvData)) {
-    throw new Error('Trac returned HTML instead of CSV');
+    throw new ToolError('upstream_error', 'Trac returned HTML instead of CSV');
   }
 
   return parseCsvRecords(csvData);
@@ -821,7 +844,7 @@ export async function searchTracTickets(
 
   const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
   if (!totalMatch?.[1]) {
-    throw new Error('Trac did not return the total ticket count');
+    throw new ToolError('upstream_error', 'Trac did not return the total ticket count');
   }
 
   const totalFound = Number.parseInt(totalMatch[1].replace(/,/g, ''), 10);
@@ -857,8 +880,23 @@ async function fetchTicket(
   ]);
 
   const record = records.find((candidate) => Number.parseInt(candidate.id ?? '', 10) === ticketId);
-  if (!record || !rssResponse.ok) {
-    throw new Error(`Ticket ${ticketId} not found`);
+  if (rssResponse.status === 404) {
+    if (record) {
+      throw new ToolError(
+        'upstream_error',
+        `Trac returned inconsistent data for ticket ${ticketId}`
+      );
+    }
+    throw new ToolError('not_found', `Ticket ${ticketId} not found`, {
+      resource: 'ticket',
+      id: ticketId,
+    });
+  }
+  if (!rssResponse.ok) {
+    throw upstreamHttpError(rssResponse);
+  }
+  if (!record) {
+    throw new ToolError('upstream_error', `Trac returned inconsistent data for ticket ${ticketId}`);
   }
 
   const rssText = await rssResponse.text();
@@ -982,6 +1020,16 @@ ${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText
   };
 }
 
+function changesetFetchError(revision: number, response: Response): ToolError {
+  if (response.status === 404) {
+    return new ToolError('not_found', `Changeset ${revision} not found`, {
+      resource: 'changeset',
+      id: revision,
+    });
+  }
+  return upstreamHttpError(response);
+}
+
 async function fetchChangeset(
   instance: TracInstance,
   revision: number,
@@ -994,7 +1042,7 @@ async function fetchChangeset(
   });
 
   if (!response.ok) {
-    throw new Error(`Changeset ${revision} not found`);
+    throw changesetFetchError(revision, response);
   }
 
   const html = await response.text();
@@ -1073,7 +1121,7 @@ async function fetchTracFieldOptions(
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    throw upstreamHttpError(response);
   }
 
   const html = await response.text();
@@ -1090,7 +1138,7 @@ async function fetchTracFieldOptions(
     new RegExp(`<select[^>]*\\bname="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
   )?.[1];
   if (!select) {
-    throw new Error(`Trac did not return ${field} options`);
+    throw new ToolError('upstream_error', `Trac did not return ${field} options`);
   }
 
   return {
@@ -1153,7 +1201,7 @@ async function fetchTimeline(instance: TracInstance, days: number, limit: number
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
   if (!response.ok) {
-    throw new Error(`Failed to fetch timeline: ${response.statusText}`);
+    throw upstreamHttpError(response, `Failed to fetch timeline: ${response.statusText}`);
   }
 
   return parseRssItems(await response.text()).map((item, index) => ({
@@ -1186,6 +1234,16 @@ function toolResult(id: JsonRpcRequest['id'], result: unknown, isError = false) 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error';
+}
+
+function toolErrorResult(id: JsonRpcRequest['id'], error: unknown) {
+  const toolError =
+    error instanceof ToolError ? error : new ToolError('upstream_error', errorMessage(error));
+  return toolResult(
+    id,
+    { code: toolError.code, error: toolError.message, ...toolError.details },
+    true
+  );
 }
 
 async function executeStandardTool(
@@ -1465,7 +1523,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
         if (error instanceof UnknownToolError || error instanceof z.ZodError) {
           return jsonRpcError(id, -32602, errorMessage(error));
         }
-        return toolResult(id, { error: errorMessage(error) }, true);
+        return toolErrorResult(id, error);
       }
     }
 
@@ -1563,7 +1621,7 @@ Query Types:
         if (error instanceof UnknownToolError || error instanceof z.ZodError) {
           return jsonRpcError(id, -32602, errorMessage(error));
         }
-        return toolResult(id, { error: errorMessage(error) }, true);
+        return toolErrorResult(id, error);
       }
     }
 
@@ -1611,12 +1669,9 @@ async function getTimelineForChatGPT(instance: TracInstance, days: number, limit
 async function runChatGptSearch(instance: TracInstance, query: string) {
   const trimmed = query.trim();
 
-  /*
-   * A direct lookup that misses is an empty result rather than an error, but an
-   * instance that does not exist is a broken connection the caller must see.
-   */
+  // A direct lookup that misses is an empty result. Every other failure remains an error.
   const emptyResultForMiss = (error: unknown) => {
-    if (error instanceof UnknownTracInstanceError) {
+    if (!(error instanceof ToolError) || error.code !== 'not_found') {
       throw error;
     }
     return { results: [], query, totalFound: 0 };

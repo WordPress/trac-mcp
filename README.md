@@ -95,6 +95,35 @@ read.
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
 separate argument overrides the same field in `query`. Results include pagination metadata.
 
+### Tool errors
+
+A failed tool call returns an MCP result with `isError: true`. Its JSON payload carries a
+machine-readable `code` alongside the human-readable `error` message. `not_found` errors also name
+the `resource` and `id` that were requested:
+
+```json
+{
+  "code": "not_found",
+  "error": "Ticket 99999999 not found",
+  "resource": "ticket",
+  "id": 99999999
+}
+```
+
+| `code` | Meaning |
+| --- | --- |
+| `not_found` | The requested ticket or changeset does not exist |
+| `invalid_argument` | An argument passed schema validation but cannot be used, such as an unsupported search filter field |
+| `rate_limited` | Trac throttled the request and bounded retries did not clear it |
+| `upstream_error` | Trac or a supporting service failed or returned unexpected content |
+
+Codes are stable API surface: branch on `code`, never on `error` wording. An existing code keeps
+its meaning and is only removed or renamed with a major version bump, while messages can change
+freely. New codes may be added over time, so treat an unrecognized code as `upstream_error`.
+
+Arguments that fail schema validation are rejected earlier with a JSON-RPC `-32602` invalid-params
+error and do not produce a tool error result.
+
 ## Connect
 
 Remote-capable MCP clients can connect directly to the standard endpoint. Clients that need a local

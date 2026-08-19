@@ -74,6 +74,7 @@ Use these public tickets only. Each one is here because it covers a distinct par
 | `65793` | Linked PR with no reviews; attachments kept separate from comments |
 | `62358` | Linked PR with no checks; changesets kept separate from comments |
 | `r58504` | Changeset, with and without its diff |
+| `99999999` | Nonexistent ticket and revision; the `not_found` tool error path |
 
 ```bash
 call /mcp searchTickets '{"query":"editor","limit":2}'
@@ -131,6 +132,16 @@ call /mcp getTracInfo '{}'
 ```
 
 Every one of these returns a JSON-RPC error rather than a success envelope or a crash. Bad arguments come back as `-32602` invalid params with the failing field named. A malformed request that returns `200` with empty content is a bug.
+
+Failures inside a tool return a tool result with `isError: true` and a machine-readable `code` next to the prose `error` message:
+
+```bash
+call /mcp getTicket '{"id":99999999}'
+call /mcp getChangeset '{"revision":99999999,"includeDiff":false}'
+call /mcp searchTickets '{"query":"bogusfield~=value"}'
+```
+
+The missing ticket and changeset each return `"code": "not_found"` with `resource` and `id` naming what was requested, for example `{"code": "not_found", "error": "Ticket 99999999 not found", "resource": "ticket", "id": 99999999}`. The unsupported filter field returns `"code": "invalid_argument"`. The full code set and its stability guarantee are documented in the README under "Tool errors".
 
 ## 7. Other Trac instances
 
