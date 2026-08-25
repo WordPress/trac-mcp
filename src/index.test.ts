@@ -97,8 +97,47 @@ afterEach(() => {
 });
 
 describe('Trac parsing', () => {
-  it('cleans nested HTML entities and invisible characters', () => {
-    expect(cleanTracText('&lt;p&gt;It&#39;s clean&lt;/p&gt;\u200B')).toBe("It's clean");
+  it('strips tags and decodes HTML entities and invisible characters', () => {
+    expect(cleanTracText('<p>It&#39;s clean</p>\u200B', CORE_TRAC.origin)).toBe("It's clean");
+  });
+
+  it('keeps escaped markup in a code span as text', () => {
+    expect(cleanTracText('<p>Use <code>&lt;script&gt;</code> here.</p>', CORE_TRAC.origin)).toBe(
+      'Use <script> here.'
+    );
+  });
+
+  it('keeps an external link without its class or icon span', () => {
+    expect(
+      cleanTracText(
+        '<p>See the <a class="ext-link" href="https://example.org/plugin"><span class="icon">\u200B</span>example plugin</a>.</p>',
+        CORE_TRAC.origin
+      )
+    ).toBe('See the <a href="https://example.org/plugin">example plugin</a>.');
+  });
+
+  it('keeps an internal ticket link without its class or title', () => {
+    expect(
+      cleanTracText(
+        '<p>In <a class="closed ticket" href="/ticket/58664" title="defect (bug): Adopt script helpers (closed: fixed)">#58664</a>.</p>',
+        CORE_TRAC.origin
+      )
+    ).toBe('In <a href="https://core.trac.wordpress.org/ticket/58664">#58664</a>.');
+  });
+
+  it('resolves a relative href from a field change against the instance', () => {
+    expect(
+      cleanTracText(
+        '<li><strong>description</strong> modified (<a href="/ticket/59446?action=diff&amp;version=6">diff</a>)</li>',
+        CORE_TRAC.origin
+      )
+    ).toBe(
+      '- description modified (<a href="https://core.trac.wordpress.org/ticket/59446?action=diff&version=6">diff</a>)'
+    );
+  });
+
+  it('drops an anchor that carries no href', () => {
+    expect(cleanTracText('<p><a name="top"></a>Top</p>', CORE_TRAC.origin)).toBe('Top');
   });
 
   it('parses quoted CSV fields', () => {
@@ -479,6 +518,73 @@ describe('MCP transport', () => {
     expect(result.text).not.toContain('Slack mention.');
     expect(result.text).not.toContain('Pull request relay.');
     expect(result.text).not.toContain('Ticket description repeated.');
+  });
+
+  it('keeps escaped markup in the description and in comments', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>&lt;p&gt;Sample: &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;&lt;/p&gt;</description>
+      <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title>status changed</title><link>https://core.trac.wordpress.org/ticket/51407#comment:2</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; closed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Also &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;.&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n51407,Script tag ticket,closed'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTicket',
+        arguments: { id: 51407, includeComments: true, commentLimit: 10 },
+      },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.text).toContain('Sample: <script>');
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({ id: 2, comment: 'Also <script>.' }),
+    ]);
+  });
+
+  it('keeps comment links and resolves relative ones against the connected instance', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>&lt;p&gt;See &lt;a class=&quot;ext-link&quot; href=&quot;https://github.com/WordPress/wordpress-develop/pull/1&quot;&gt;&lt;span class=&quot;icon&quot;&gt;​&lt;/span&gt;existing PR&lt;/a&gt;.&lt;/p&gt;</description>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://meta.trac.wordpress.org/ticket/5483#comment:1</link><description>&lt;p&gt;Also &lt;a class=&quot;closed ticket&quot; href=&quot;/ticket/5480&quot; title=&quot;defect: something (closed: fixed)&quot;&gt;#5480&lt;/a&gt;.&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n5483,Meta ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 5483, includeComments: true } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.text).toContain(
+      'See <a href="https://github.com/WordPress/wordpress-develop/pull/1">existing PR</a>.'
+    );
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({
+        comment: 'Also <a href="https://meta.trac.wordpress.org/ticket/5480">#5480</a>.',
+      }),
+    ]);
   });
 
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {
