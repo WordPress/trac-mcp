@@ -402,15 +402,56 @@ function normalizeTracText(value: string): string {
 }
 
 /*
- * Takes an HTML fragment and returns its text. Callers reading RSS must decode the XML
- * level first, which `readXmlText` does.
+ * Trac decorates every link it renders: `class` for styling, `title` with a summary of the
+ * target, and an empty `<span class="icon">` before external link text. None of that helps a
+ * reader, so only the href is kept. Hrefs stay entity-encoded here because the whole text is
+ * decoded once at the end.
  */
-export function cleanTracText(html: string): string {
+function rewriteAnchor(tag: string, origin: string): string {
+  const href = tag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
+  const target = href?.[1] ?? href?.[2] ?? href?.[3];
+  if (!target) {
+    return '';
+  }
+
+  try {
+    return `<a href="${new URL(target, origin).href}">`;
+  } catch {
+    return '';
+  }
+}
+
+/*
+ * Takes an HTML fragment and returns text, keeping links as `<a href>` with an absolute URL.
+ * Agents read HTML, and a Trac comment that points at a pull request or another ticket loses
+ * its point when the URL goes. Callers reading RSS must decode the XML level first, which
+ * `readXmlText` does.
+ */
+export function cleanTracText(html: string, origin: string): string {
+  const anchors: boolean[] = [];
   const text = html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(?:div|li|ol|p|pre|tr|ul)>/gi, '\n')
-    .replace(/<li[^>]*>/gi, '- ')
-    .replace(/<[^>]*>/g, '');
+    .replace(/<span\s[^>]*class=["']?icon["']?[^>]*>[\s\S]*?<\/span>/gi, '')
+    .replace(/<[^>]*>/g, (tag) => {
+      if (/^<br\s*\/?>$/i.test(tag)) {
+        return '\n';
+      }
+      if (/^<\/(?:div|li|ol|p|pre|tr|ul)>$/i.test(tag)) {
+        return '\n';
+      }
+      if (/^<li[\s>]/i.test(tag)) {
+        return '- ';
+      }
+      if (/^<a[\s>]/i.test(tag)) {
+        const anchor = rewriteAnchor(tag, origin);
+        anchors.push(anchor !== '');
+        return anchor;
+      }
+      // An unbalanced `</a>` closes nothing; drop it with the rest of the markup.
+      if (/^<\/a\s*>$/i.test(tag)) {
+        return anchors.pop() ? '</a>' : '';
+      }
+      return '';
+    });
 
   return normalizeTracText(decodeHtmlEntities(text));
 }
@@ -427,7 +468,7 @@ function readXmlText(source: string, tag: string): string {
   return cdata?.[1] ?? decodeXmlEntities(raw);
 }
 
-function parseRssItems(rssText: string) {
+function parseRssItems(rssText: string, origin: string) {
   return Array.from(rssText.matchAll(/<item>([\s\S]*?)<\/item>/gi), (match) => {
     const item = match[1] ?? '';
     const descriptionHtml = readXmlText(item, 'description');
@@ -437,7 +478,7 @@ function parseRssItems(rssText: string) {
       link: normalizeTracText(readXmlText(item, 'link')),
       date: normalizeTracText(readXmlText(item, 'pubDate')),
       author: normalizeTracText(readXmlText(item, 'dc:creator')),
-      description: cleanTracText(descriptionHtml),
+      description: cleanTracText(descriptionHtml, origin),
       descriptionHtml,
     };
   });
@@ -462,10 +503,10 @@ const TICKET_FIELDS = new Set([
   'version',
 ]);
 
-function splitTicketHistoryDescription(html: string) {
+function splitTicketHistoryDescription(html: string, origin: string) {
   const list = html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i);
   if (!list?.[0] || !list[1]) {
-    return { html, body: cleanTracText(html) };
+    return { html, body: cleanTracText(html, origin) };
   }
 
   const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi), (match) =>
@@ -480,11 +521,11 @@ function splitTicketHistoryDescription(html: string) {
     items.length === 0 ||
     items.some((field) => !field || !TICKET_FIELDS.has(field))
   ) {
-    return { html, body: cleanTracText(html) };
+    return { html, body: cleanTracText(html, origin) };
   }
 
   const narrativeHtml = html.slice(list[0].length);
-  return { html, body: cleanTracText(narrativeHtml), narrativeHtml };
+  return { html, body: cleanTracText(narrativeHtml, origin), narrativeHtml };
 }
 
 function filterTicketFieldChurn(changes: string): string {
@@ -505,12 +546,12 @@ function filterTicketFieldChurn(changes: string): string {
     .join('; ');
 }
 
-function attachmentFilename(html: string): string {
+function attachmentFilename(html: string, origin: string): string {
   const emphasized = html.match(/<em(?:\s[^>]*)?>([\s\S]*?)<\/em>/i)?.[1];
   const fieldValue = html.match(
     /<strong(?:\s[^>]*)?>\s*attachment\s*<\/strong>[\s\S]*?<span\s+class=["']trac-field-new["'][^>]*>([\s\S]*?)<\/span>/i
   )?.[1];
-  return cleanTracText(emphasized ?? fieldValue ?? '');
+  return cleanTracText(emphasized ?? fieldValue ?? '', origin);
 }
 
 type RssItem = ReturnType<typeof parseRssItems>[number];
@@ -531,9 +572,9 @@ function classifyTicketHistoryItem(
     return null;
   }
 
-  const parsedDescription = splitTicketHistoryDescription(item.descriptionHtml);
+  const parsedDescription = splitTicketHistoryDescription(item.descriptionHtml, instance.origin);
   if (item.title.toLowerCase() === 'attachment set') {
-    const filename = attachmentFilename(parsedDescription.html);
+    const filename = attachmentFilename(parsedDescription.html, instance.origin);
     return {
       kind: 'attachment',
       entry: {
@@ -561,7 +602,7 @@ function classifyTicketHistoryItem(
         author: item.author,
         timestamp: item.date,
         changes: filterTicketFieldChurn(item.title),
-        message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length)),
+        message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length), instance.origin),
         url: `${instance.origin}/changeset/${revision}`,
       },
     };
@@ -590,7 +631,7 @@ function classifyTicketHistory(instance: TracInstance, ticketId: number, rssText
   const attachments: TicketAttachment[] = [];
   const changesets: TicketChangeset[] = [];
 
-  for (const item of parseRssItems(rssText)) {
+  for (const item of parseRssItems(rssText, instance.origin)) {
     const classified = classifyTicketHistoryItem(instance, ticketId, item);
     if (classified?.kind === 'comment') {
       comments.push(classified.entry);
@@ -922,7 +963,7 @@ async function fetchTicket(
 
   const rssText = await rssResponse.text();
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
-  const description = cleanTracText(readXmlText(channel, 'description'));
+  const description = cleanTracText(readXmlText(channel, 'description'), instance.origin);
   const history = classifyTicketHistory(instance, ticketId, rssText);
   const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
   const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
@@ -1068,17 +1109,21 @@ async function fetchChangeset(
 
   const html = await response.text();
   const message = cleanTracText(
-    html.match(/<dd class="message[^"]*"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? ''
+    html.match(/<dd class="message[^"]*"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '',
+    instance.origin
   );
-  const author = cleanTracText(html.match(/<dd class="author"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '');
+  const author = cleanTracText(
+    html.match(/<dd class="author"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '',
+    instance.origin
+  );
   const date =
-    cleanTracText(html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '')
+    cleanTracText(html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '', instance.origin)
       .split('\n')[0]
       ?.trim() ?? '';
   const filesSection = html.match(/<dd class="files"[^>]*>([\s\S]*?)<\/ul>\s*<\/dd>/i)?.[1] ?? '';
   const files = Array.from(
     filesSection.matchAll(/<a[^>]*href="\/browser\/[^"]*"[^>]*>([\s\S]*?)<\/a>/gi),
-    (match) => cleanTracText(match[1] ?? '')
+    (match) => cleanTracText(match[1] ?? '', instance.origin)
   ).filter(Boolean);
 
   let diff = '';
@@ -1164,7 +1209,7 @@ async function fetchTracFieldOptions(
 
   return {
     data: Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
-      cleanTracText(match[1] ?? '')
+      cleanTracText(match[1] ?? '', instance.origin)
     ).filter(Boolean),
     configured: true,
   };
@@ -1225,7 +1270,7 @@ async function fetchTimeline(instance: TracInstance, days: number, limit: number
     throw upstreamHttpError(response, `Failed to fetch timeline: ${response.statusText}`);
   }
 
-  return parseRssItems(await response.text()).map((item, index) => ({
+  return parseRssItems(await response.text(), instance.origin).map((item, index) => ({
     id: item.link || `event-${index}`,
     title: item.title || 'Unknown Event',
     text: `${item.title || 'Unknown Event'}\n\nAuthor: ${item.author || 'Unknown'}\nDate: ${item.date || 'Unknown'}\n\n${item.description || 'No description available'}`,
