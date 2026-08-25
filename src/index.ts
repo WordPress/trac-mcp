@@ -348,52 +348,51 @@ type TicketChangeset = {
   url: string;
 };
 
-const HTML_ENTITIES: Record<string, string> = {
+/*
+ * Trac escapes its content once per format it passes through. An RSS item body is HTML
+ * escaped as XML, so `<code>&lt;script&gt;</code>` arrives as
+ * `&lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;`. Each level is undone by exactly one
+ * pass of the matching decoder, in order: XML when the item is read, HTML after the tags
+ * are stripped. Decoding twice, or decoding before stripping, turns escaped markup into a
+ * tag and the tag stripper then deletes it.
+ */
+const XML_ENTITIES: Record<string, string> = {
   amp: '&',
   apos: "'",
   gt: '>',
   lt: '<',
-  nbsp: ' ',
   quot: '"',
 };
 
-function decodeHtmlEntity(entity: string, code: string): string {
-  if (code[0] !== '#') {
-    return HTML_ENTITIES[code.toLowerCase()] ?? entity;
-  }
+const HTML_ENTITIES: Record<string, string> = { ...XML_ENTITIES, nbsp: ' ' };
 
-  const radix = code[1]?.toLowerCase() === 'x' ? 16 : 10;
-  const digits = radix === 16 ? code.slice(2) : code.slice(1);
-  const point = Number.parseInt(digits, radix);
-  return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
-    ? String.fromCodePoint(point)
-    : entity;
+const ENTITY_REFERENCE = /&(#x[\da-f]+|#\d+|[a-z]+);/gi;
+
+function decodeEntities(value: string, named: Record<string, string>): string {
+  return value.replace(ENTITY_REFERENCE, (entity: string, code: string) => {
+    if (code[0] !== '#') {
+      return named[code.toLowerCase()] ?? entity;
+    }
+
+    const radix = code[1]?.toLowerCase() === 'x' ? 16 : 10;
+    const digits = radix === 16 ? code.slice(2) : code.slice(1);
+    const point = Number.parseInt(digits, radix);
+    return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+      ? String.fromCodePoint(point)
+      : entity;
+  });
+}
+
+function decodeXmlEntities(value: string): string {
+  return decodeEntities(value, XML_ENTITIES);
 }
 
 function decodeHtmlEntities(value: string): string {
-  let decoded = value;
-  for (let pass = 0; pass < 3; pass++) {
-    const next = decoded.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, decodeHtmlEntity);
-
-    if (next === decoded) {
-      break;
-    }
-    decoded = next;
-  }
-
-  return decoded;
+  return decodeEntities(value, HTML_ENTITIES);
 }
 
-export function cleanTracText(value: string): string {
-  let text = value.replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, '$1').replace(/^\uFEFF/, '');
-
-  text = decodeHtmlEntities(text)
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(?:div|li|ol|p|pre|tr|ul)>/gi, '\n')
-    .replace(/<li[^>]*>/gi, '- ')
-    .replace(/<[^>]*>/g, '');
-
-  return decodeHtmlEntities(text)
+function normalizeTracText(value: string): string {
+  return value
     .replace(/[\u200B\uFEFF]/g, '')
     .replace(/\r/g, '')
     .replace(/[ \t]+\n/g, '\n')
@@ -402,21 +401,44 @@ export function cleanTracText(value: string): string {
     .trim();
 }
 
+/*
+ * Takes an HTML fragment and returns its text. Callers reading RSS must decode the XML
+ * level first, which `readXmlText` does.
+ */
+export function cleanTracText(html: string): string {
+  const text = html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:div|li|ol|p|pre|tr|ul)>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<[^>]*>/g, '');
+
+  return normalizeTracText(decodeHtmlEntities(text));
+}
+
 function extractXmlElement(source: string, tag: string): string {
   const match = source.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i'));
   return match?.[1] ?? '';
 }
 
+// One XML decode, or none at all when the element carries its content as CDATA.
+function readXmlText(source: string, tag: string): string {
+  const raw = extractXmlElement(source, tag);
+  const cdata = raw.match(/^\s*<!\[CDATA\[([\s\S]*)\]\]>\s*$/);
+  return cdata?.[1] ?? decodeXmlEntities(raw);
+}
+
 function parseRssItems(rssText: string) {
   return Array.from(rssText.matchAll(/<item>([\s\S]*?)<\/item>/gi), (match) => {
     const item = match[1] ?? '';
+    const descriptionHtml = readXmlText(item, 'description');
     return {
-      title: cleanTracText(extractXmlElement(item, 'title')),
-      link: cleanTracText(extractXmlElement(item, 'link')),
-      description: cleanTracText(extractXmlElement(item, 'description')),
-      rawDescription: extractXmlElement(item, 'description'),
-      date: cleanTracText(extractXmlElement(item, 'pubDate')),
-      author: cleanTracText(extractXmlElement(item, 'dc:creator')),
+      // Trac writes these four as plain text, so the XML decode leaves nothing to strip.
+      title: normalizeTracText(readXmlText(item, 'title')),
+      link: normalizeTracText(readXmlText(item, 'link')),
+      date: normalizeTracText(readXmlText(item, 'pubDate')),
+      author: normalizeTracText(readXmlText(item, 'dc:creator')),
+      description: cleanTracText(descriptionHtml),
+      descriptionHtml,
     };
   });
 }
@@ -440,8 +462,7 @@ const TICKET_FIELDS = new Set([
   'version',
 ]);
 
-function splitTicketHistoryDescription(rawDescription: string) {
-  const html = decodeHtmlEntities(rawDescription);
+function splitTicketHistoryDescription(html: string) {
   const list = html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i);
   if (!list?.[0] || !list[1]) {
     return { html, body: cleanTracText(html) };
@@ -510,7 +531,7 @@ function classifyTicketHistoryItem(
     return null;
   }
 
-  const parsedDescription = splitTicketHistoryDescription(item.rawDescription);
+  const parsedDescription = splitTicketHistoryDescription(item.descriptionHtml);
   if (item.title.toLowerCase() === 'attachment set') {
     const filename = attachmentFilename(parsedDescription.html);
     return {
@@ -901,7 +922,7 @@ async function fetchTicket(
 
   const rssText = await rssResponse.text();
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
-  const description = cleanTracText(extractXmlElement(channel, 'description'));
+  const description = cleanTracText(readXmlText(channel, 'description'));
   const history = classifyTicketHistory(instance, ticketId, rssText);
   const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
   const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
