@@ -97,8 +97,14 @@ afterEach(() => {
 });
 
 describe('Trac parsing', () => {
-  it('cleans nested HTML entities and invisible characters', () => {
-    expect(cleanTracText('&lt;p&gt;It&#39;s clean&lt;/p&gt;\u200B')).toBe("It's clean");
+  it('strips tags and decodes HTML entities and invisible characters', () => {
+    expect(cleanTracText('<p>It&#39;s clean</p>\u200B')).toBe("It's clean");
+  });
+
+  it('keeps escaped markup in a code span as text', () => {
+    expect(cleanTracText('<p>Use <code>&lt;script&gt;</code> here.</p>')).toBe(
+      'Use <script> here.'
+    );
   });
 
   it('parses quoted CSV fields', () => {
@@ -479,6 +485,37 @@ describe('MCP transport', () => {
     expect(result.text).not.toContain('Slack mention.');
     expect(result.text).not.toContain('Pull request relay.');
     expect(result.text).not.toContain('Ticket description repeated.');
+  });
+
+  it('keeps escaped markup in the description and in comments', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>&lt;p&gt;Sample: &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;&lt;/p&gt;</description>
+      <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title>status changed</title><link>https://core.trac.wordpress.org/ticket/51407#comment:2</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; closed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Also &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;.&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n51407,Script tag ticket,closed'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTicket',
+        arguments: { id: 51407, includeComments: true, commentLimit: 10 },
+      },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.text).toContain('Sample: <script>');
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({ id: 2, comment: 'Also <script>.' }),
+    ]);
   });
 
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {
