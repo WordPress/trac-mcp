@@ -549,6 +549,39 @@ describe('MCP transport', () => {
     expect(result.text).not.toContain('Ticket description repeated.');
   });
 
+  it('keeps a bulleted list in a plain comment as prose, not field changes', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>Ticket description</description>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:3</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; should stay open&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;My recommendation.&lt;/p&gt;</description></item>
+      <item><dc:creator>watcher</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title>cc changed</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;p&gt;&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65793,Accessibility ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65793, includeComments: true } },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({
+        id: 3,
+        changes: '',
+        comment: '- status should stay open\n\nMy recommendation.',
+      }),
+    ]);
+    expect(result.metadata.omittedComments).toEqual([{ id: 4, author: 'watcher', reason: 'cc' }]);
+  });
+
   it('keeps escaped markup in the description and in comments', async () => {
     const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
       <description>&lt;p&gt;Sample: &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;&lt;/p&gt;</description>

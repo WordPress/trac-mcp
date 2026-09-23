@@ -513,18 +513,19 @@ const TICKET_FIELDS = new Set([
 
 type TicketFieldChange = { field: string; value: string };
 
-function splitTicketHistoryDescription(html: string, origin: string) {
-  const list = html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i);
+// Trac's RSS title names the fields an entry changed; a comment with no changes has an empty
+// title, so a bulleted list there is prose and not a change list.
+function splitTicketHistoryDescription(html: string, origin: string, title: string) {
+  const list = title.trim() ? html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i) : null;
   if (!list?.[0] || !list[1]) {
     return { html, body: cleanTracText(html, origin) };
   }
 
   const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>([\s\S]*?)<\/li>/gi), (match) => {
-    const item = match[1] ?? '';
-    const label = item.match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>/i);
+    const label = (match[1] ?? '').match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>([\s\S]*)$/i);
     return {
       field: label?.[1]?.trim().toLowerCase() ?? '',
-      value: cleanTracText(item.slice((label?.index ?? 0) + (label?.[0].length ?? 0)), origin),
+      value: cleanTracText(label?.[2] ?? '', origin),
     };
   });
   const unmatched = list[1].replace(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi, '').trim();
@@ -611,7 +612,11 @@ function classifyTicketHistoryItem(
     return null;
   }
 
-  const parsedDescription = splitTicketHistoryDescription(item.descriptionHtml, instance.origin);
+  const parsedDescription = splitTicketHistoryDescription(
+    item.descriptionHtml,
+    instance.origin,
+    item.title
+  );
   if (item.title.toLowerCase() === 'attachment set') {
     const filename = attachmentFilename(parsedDescription.html, instance.origin);
     return {
@@ -649,7 +654,10 @@ function classifyTicketHistoryItem(
 
   const changes = describeTicketChanges(parsedDescription.fields, item.title);
   if (!changes && !parsedDescription.body) {
-    return omittedTicketComment(item, parsedDescription.fields?.length ? 'cc' : 'empty');
+    return omittedTicketComment(
+      item,
+      parsedDescription.fields || /\bcc\b/i.test(item.title) ? 'cc' : 'empty'
+    );
   }
   return {
     kind: 'comment',
