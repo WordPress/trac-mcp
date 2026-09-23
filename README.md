@@ -65,6 +65,12 @@ The standard `/mcp` endpoint provides:
 | `getTimeline` | Read recent Trac activity |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
 
+`getTicket` leaves bot comments, cc-only changes, and entries with neither a change nor text out of
+`comments` and lists each one under `omittedComments` with its ID, author, and reason (`bot`, `cc`,
+or `empty`), so a gap in the comment numbering is explained rather than mistaken for truncation.
+Every other field change a person makes is reported in `changes` with its values, including keyword
+edits and description edits with their diff link.
+
 `getChangeset` expects the numeric `revision` argument, not `rev`:
 
 ```json

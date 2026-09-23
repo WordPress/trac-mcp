@@ -74,7 +74,7 @@ Use these public tickets only. Each one is here because it covers a distinct par
 | `65793` | Linked PR with no reviews; attachments kept separate from comments |
 | `62358` | Linked PR with no checks; changesets kept separate from comments |
 | `51407` | Escaped markup in a description; the text `<script>` inside a code span |
-| `59446` | Links in a description and in comments |
+| `59446` | Links in a description and in comments; comments 1 and 7 are bot comments listed under `omittedComments` |
 | `r58504` | Changeset, with and without its diff |
 | `r62723` | Escaped markup in a changeset message; the same `<script>` text |
 | `99999999` | Nonexistent ticket and revision; the `not_found` tool error path |
