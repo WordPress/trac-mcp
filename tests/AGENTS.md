@@ -6,12 +6,12 @@ Two layers, and they catch different failures.
 
 | Layer | Command | Runs in CI | Catches |
 | --- | --- | --- | --- |
-| Automated | `pnpm check` | Yes, on every PR and push to `main` | Type errors, lint and format drift, parser and protocol regressions against mocked responses, a broken Worker build in either environment |
+| Automated | `pnpm check` | Yes, on every PR and push to `trunk` | Type errors, lint and format drift, parser and protocol regressions against mocked responses, a broken Worker build in either environment |
 | Manual smoke test | `docs/smoke-test.md` | No | A stale deployment, upstream Trac markup changes, transport behavior against a real server |
 
 CI (`.github/workflows/ci.yml`) runs the same project check and nothing else, so run it locally before pushing rather than using CI as the first check. A local pass is a good signal, not a guarantee. CI installs from a frozen lockfile on Linux with Node 22 and depends on GitHub services. It can still fail on environment or dependency differences a local run never sees.
 
-**Green CI does not mean the feature works.** Every automated test mocks Trac, by design, so the suite passes whether or not Trac still returns what the parser expects and whether or not the deployed Worker matches `main`. Only the smoke test answers those. Run it against `pnpm dev` before opening a PR that touches Trac parsing or MCP transport, and against the deployment after it ships.
+**Green CI does not mean the feature works.** Every automated test mocks Trac, by design, so the suite passes whether or not Trac still returns what the parser expects and whether or not the deployed Worker matches `trunk`. Only the smoke test answers those. Run it against `pnpm dev` before opening a PR that touches Trac parsing or MCP transport, and against the deployment after it ships.
 
 ## Where tests go
 

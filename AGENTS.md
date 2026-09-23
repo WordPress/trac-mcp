@@ -2,7 +2,9 @@
 
 ## Purpose
 
-This repository provides a read-only MCP server for public WordPress Core Trac data. Preserve that trust boundary: no Trac writes, credentials, user-selected upstream hosts, or unbounded inputs.
+This repository provides a read-only MCP server for public WordPress.org Trac data. Preserve that trust boundary: no Trac writes, credentials, or unbounded inputs.
+
+The upstream host is derived from a URL path segment, so treat that derivation as security-relevant. A request may only reach `<slug>.trac.wordpress.org` where the slug matches `TRAC_SLUG_PATTERN`, and `fetchTrac` rechecks every URL against the resolved instance origin. Redirects are never followed: the domain has wildcard DNS and sends unknown subdomains to Core, so a followed redirect would silently answer for one instance with another's data.
 
 ## Work locally
 
@@ -25,7 +27,10 @@ Green CI does not mean the feature works: every automated test mocks Trac. Follo
 - Keep advertised JSON schemas and Zod runtime schemas aligned.
 - Add or update tests for parser, protocol, routing, and pagination behavior.
 - Treat Trac responses as untrusted input.
-- Keep upstream requests on `core.trac.wordpress.org` and the official linked-PR endpoint at `api.wordpress.org/dotorg/trac/pr/`.
+- Keep upstream requests on `*.trac.wordpress.org` and the official linked-PR endpoint at `api.wordpress.org/dotorg/trac/pr/`.
+- Take the Trac instance from the endpoint path, never from a tool argument. Binding it to the connection is what stops a client reading the wrong Trac.
+- Expect fields to differ between instances. Report a field an instance does not configure as unavailable rather than failing, but keep failing when the page is not a Trac query page at all.
+- Never return results for a filter on a field the instance does not configure. Trac ignores such a filter and returns the unfiltered result set, which is indistinguishable from a real answer. The query and the field check run together, so the guard discards the response rather than preventing the request. Check against the filter picker Trac renders on every query page, and treat that list as the authority for which fields exist.
 - Return upstream failures as MCP tool errors.
 - Update README and manual checks when behavior changes.
 - Do not deploy without explicit maintainer approval.

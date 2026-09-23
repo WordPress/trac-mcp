@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.WordPress/trac-mcp",
-  "title": "WordPress Core Trac",
-  "description": "Read-only Model Context Protocol server for WordPress Core Trac",
-  "version": "1.0.0",
+  "title": "WordPress Trac",
+  "description": "Read-only Model Context Protocol server for WordPress Trac",
+  "version": "1.1.0",
   "websiteUrl": "https://wordpress-trac-mcp-server-prod.a8c-aiops.workers.dev/",
   "repository": {
     "url": "https://github.com/WordPress/trac-mcp",

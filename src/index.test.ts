@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker, {
   addTicketSearchQuery,
   cleanTracText,
+  CORE_TRAC,
   fetchTrac,
   GetTimelineArgsSchema,
+  matchMcpRoute,
   parseCsvRecords,
   parseTicketFilter,
   searchTracTickets,
+  tracInstance,
 } from './index';
 
 const context = {} as ExecutionContext;
@@ -25,6 +28,7 @@ type TimelineContinuation = TimelineWindow & {
   limit: number;
 };
 type TimelineResult = {
+  timelineUrl?: string;
   results: Array<{ url: string; metadata: { date: string; author: string } }>;
   returned?: number;
   requested?: TimelineWindow;
@@ -58,13 +62,16 @@ function mcpRequest(body: unknown, path = '/mcp') {
   );
 }
 
-async function callTimeline(args: Record<string, unknown>): Promise<TimelineResult> {
-  const response = await mcpRequest({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/call',
-    params: { name: 'getTimeline', arguments: args },
-  });
+async function callTimeline(args: Record<string, unknown>, path = '/mcp'): Promise<TimelineResult> {
+  const response = await mcpRequest(
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTimeline', arguments: args },
+    },
+    path
+  );
   const body = (await response.json()) as RpcBody;
   return JSON.parse(body.result.content.at(0)?.text ?? '{}');
 }
@@ -274,7 +281,7 @@ describe('ticket search pagination', () => {
       .mockResolvedValueOnce(new Response('Bad Request', { status: 400 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(searchTracTickets('', 10, 85)).resolves.toEqual({
+    await expect(searchTracTickets(CORE_TRAC, '', 10, 85)).resolves.toEqual({
       tickets: [],
       totalFound: 840,
       returned: 0,
@@ -297,6 +304,7 @@ describe('Trac retries', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await fetchTrac(
+      CORE_TRAC,
       'https://core.trac.wordpress.org/timeline',
       undefined,
       [0, 0, 0, 0]
@@ -315,7 +323,12 @@ describe('Trac retries', () => {
       .mockResolvedValue(new Response(statusText, { status, statusText }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const response = await fetchTrac('https://core.trac.wordpress.org/timeline', undefined, [0]);
+    const response = await fetchTrac(
+      CORE_TRAC,
+      'https://core.trac.wordpress.org/timeline',
+      undefined,
+      [0]
+    );
 
     expect(response.status).toBe(status);
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -327,7 +340,12 @@ describe('Trac retries', () => {
       .mockResolvedValue(new Response('Unavailable', { status: 503 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const response = await fetchTrac('https://core.trac.wordpress.org/timeline', undefined, [0, 0]);
+    const response = await fetchTrac(
+      CORE_TRAC,
+      'https://core.trac.wordpress.org/timeline',
+      undefined,
+      [0, 0]
+    );
 
     expect(response.status).toBe(503);
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -337,9 +355,9 @@ describe('Trac retries', () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchTrac('https://example.com/timeline', undefined, [0])).rejects.toThrow(
-      'Refusing non-Trac request host'
-    );
+    await expect(
+      fetchTrac(CORE_TRAC, 'https://example.com/timeline', undefined, [0])
+    ).rejects.toThrow('Refusing non-Trac request host');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -430,9 +448,11 @@ describe('MCP transport', () => {
       },
     });
     const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
 
     expect(body.result.isError).toBe(true);
-    expect(body.result.content.at(0)?.text).toContain('Forbidden');
+    expect(result.code).toBe('upstream_error');
+    expect(result.error).toContain('Forbidden');
   });
 
   it.each([7, 1])(
@@ -534,6 +554,20 @@ describe('MCP transport', () => {
       complete: true,
       authors: ['saxmatt', 'spaced name'],
       note: 'Covered the full requested window 2005-01-01 to 2005-01-31.',
+    });
+  });
+
+  it('keeps a historical window on the connected instance', async () => {
+    const fetchMock = stubTimelineFetch(timelineRss([['2005-01-31', 2]]));
+
+    const result = await callTimeline({ from: '2005-01-31', to: '2005-01-31' }, '/mcp/meta');
+
+    const fetched = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(fetched.origin).toBe('https://meta.trac.wordpress.org');
+    expect(result).toMatchObject({
+      returned: 2,
+      complete: true,
+      timelineUrl: 'https://meta.trac.wordpress.org/timeline',
     });
   });
 
@@ -989,14 +1023,471 @@ describe('MCP transport', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each(['99999999', 'r99999999'])(
-    'returns no search matches when direct lookup %s does not exist',
+  it('returns a not_found code for a missing ticket', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n'))
+        .mockResolvedValueOnce(new Response('Not Found', { status: 404, statusText: 'Not Found' }))
+        .mockResolvedValueOnce(new Response('Not Found', { status: 404 }))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 99999999 } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'not_found',
+      error: 'Ticket 99999999 not found',
+      resource: 'ticket',
+      id: 99999999,
+    });
+  });
+
+  it('returns a not_found code for a missing changeset', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('Not Found', { status: 404, statusText: 'Not Found' }))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getChangeset', arguments: { revision: 99999999, includeDiff: false } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'not_found',
+      error: 'Changeset 99999999 not found',
+      resource: 'changeset',
+      id: 99999999,
+    });
+  });
+
+  it('reports an upstream error when ticket CSV data is absent but history exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+          )
+        )
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 99999999 } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'Trac returned inconsistent data for ticket 99999999',
+    });
+  });
+
+  it('reports an upstream error when ticket CSV data exists but history is missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+        .mockResolvedValueOnce(new Response('Not Found', { status: 404, statusText: 'Not Found' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65808 } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'Trac returned inconsistent data for ticket 65808',
+    });
+  });
+
+  it('reports an upstream error, not a missing ticket, when the history fetch fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+        .mockResolvedValueOnce(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65808 } },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBe(true);
+    expect(result.code).toBe('upstream_error');
+    expect(result.error).toBe('HTTP 403: Forbidden');
+  });
+
+  it('returns a rate_limited code when Trac throttling outlasts the retries', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response('Too Many Requests', { status: 429, statusText: 'Too Many Requests' })
+        )
+    );
+
+    const responsePromise = mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getChangeset', arguments: { revision: 58504, includeDiff: false } },
+    });
+    await vi.runAllTimersAsync();
+    const body = (await (await responsePromise).json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBe(true);
+    expect(result.code).toBe('rate_limited');
+    expect(result.error).toBe('HTTP 429: Too Many Requests');
+  });
+
+  it('returns an invalid_argument code for an unsupported search filter', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'searchTickets', arguments: { query: 'bogusfield~=value' } },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBe(true);
+    expect(result.code).toBe('invalid_argument');
+    expect(result.error).toBe('Unsupported ticket filter: bogusfield');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns no search matches when an exact ticket does not exist', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n'))
+        .mockResolvedValueOnce(new Response('', { status: 404, statusText: 'Not Found' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: '99999999' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBeUndefined();
+    expect(result).toEqual({ results: [], query: '99999999', totalFound: 0 });
+  });
+
+  it('returns no search matches when an exact changeset does not exist', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('', { status: 404, statusText: 'Not Found' }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: 'r99999999' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBeUndefined();
+    expect(result).toEqual({ results: [], query: 'r99999999', totalFound: 0 });
+  });
+
+  it('propagates an upstream error from an exact ticket search', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+        .mockResolvedValueOnce(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: '65808' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'HTTP 403: Forbidden',
+    });
+  });
+
+  it('propagates an upstream error from an exact changeset search', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: 'r58504' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      code: 'upstream_error',
+      error: 'HTTP 403: Forbidden',
+    });
+  });
+});
+
+describe('Trac instance routing', () => {
+  it.each([
+    ['/mcp', 'core', false],
+    ['/mcp/chatgpt', 'core', true],
+    ['/mcp/meta', 'meta', false],
+    ['/mcp/meta/chatgpt', 'meta', true],
+    ['/mcp/glotpress', 'glotpress', false],
+  ])('routes %s to the %s instance', (pathname, slug, chatGpt) => {
+    expect(matchMcpRoute(pathname)).toEqual({
+      instance: expect.objectContaining({
+        slug,
+        origin: `https://${slug}.trac.wordpress.org`,
+      }),
+      chatGpt,
+    });
+  });
+
+  it.each([
+    ['/mcp/', 'an empty slug'],
+    ['/mcp/meta/', 'a trailing slash'],
+    ['/mcp/meta/tools', 'an unknown trailing segment'],
+    ['/mcp/meta/chatgpt/extra', 'an over-long path'],
+    ['/mcp/chatgpt/chatgpt', 'the reserved chatgpt slug'],
+    ['/mcp/Meta', 'an uppercase slug'],
+    ['/mcp/meta.trac.wordpress.org', 'a dotted slug'],
+    ['/mcp/%6Deta', 'a percent-encoded slug, which URL parsing leaves encoded'],
+    ['/mcpx', 'a different path'],
+    ['/', 'the landing page'],
+  ])('refuses %s (%s)', (pathname) => {
+    expect(matchMcpRoute(pathname)).toBeNull();
+  });
+
+  it('refuses reserved and malformed slugs', () => {
+    expect(tracInstance('chatgpt')).toBeNull();
+    expect(tracInstance('')).toBeNull();
+    expect(tracInstance('-leading')).toBeNull();
+    expect(tracInstance('trailing-')).toBeNull();
+    expect(tracInstance('a'.repeat(33))).toBeNull();
+    expect(tracInstance('meta')?.origin).toBe('https://meta.trac.wordpress.org');
+  });
+
+  it('answers an unroutable instance path with 404 rather than core data', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'ping' }, '/mcp/Meta');
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('treats an upstream redirect as an unknown instance instead of following it', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, {
+        status: 301,
+        headers: { location: 'https://core.trac.wordpress.org/timeline' },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = tracInstance('xyzzy-nope');
+    if (!instance) {
+      throw new Error('A well-formed slug should resolve regardless of whether the Trac exists');
+    }
+
+    await expect(
+      fetchTrac(instance, 'https://xyzzy-nope.trac.wordpress.org/timeline', undefined, [0, 0])
+    ).rejects.toThrow('Unknown or unavailable Trac instance: xyzzy-nope');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe('manual');
+  });
+
+  /*
+   * A redirect only proves the instance is missing when it names a target off the
+   * instance origin. Without a usable Location there is nothing to compare, so the
+   * failure has to stay generic rather than claim the Trac does not exist.
+   */
+  it('reports a redirect with no Location header as an upstream failure', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 301 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = tracInstance('xyzzy-nope');
+    if (!instance) {
+      throw new Error('A well-formed slug should resolve regardless of whether the Trac exists');
+    }
+
+    await expect(
+      fetchTrac(instance, 'https://xyzzy-nope.trac.wordpress.org/timeline', undefined, [0, 0])
+    ).rejects.toThrow('Unexpected redirect from https://xyzzy-nope.trac.wordpress.org: HTTP 301');
+  });
+
+  it('serves core under its own name at both slugless endpoints', async () => {
+    for (const path of ['/mcp', '/mcp/chatgpt']) {
+      const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, path);
+
+      expect(await response.json()).toEqual({
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'WordPress Trac', version: '1.1.0' },
+        },
+      });
+    }
+  });
+
+  it('names core in the tool output that carries an instance name', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<html><body><select name="add_filter_0"><option value="severity">Severity</option></select><select class="trac-filter" name="0_severity"><option value="blocker">blocker</option><option value="normal">normal</option></select></body></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTracInfo', arguments: { type: 'severities' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      id: 'severities',
+      title: 'WordPress Trac severities',
+      text: 'Severities available in WordPress Trac:\n\nblocker\nnormal',
+      url: 'https://core.trac.wordpress.org/',
+      metadata: { type: 'severities', data: ['blocker', 'normal'], total: 2 },
+    });
+  });
+
+  it('names a non-core instance after its Trac', async () => {
+    const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, '/mcp/meta');
+    const body = (await response.json()) as { result: { serverInfo: { name: string } } };
+
+    expect(body.result.serverInfo.name).toBe('Making WordPress.org Trac');
+  });
+
+  it('reads tickets from the routed instance and its linked pull requests', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary,status\n5483,Release confirmations,new'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<?xml version="1.0"?><rss><channel><description>Meta ticket</description></channel></rss>'
+        )
+      )
+      .mockResolvedValueOnce(Response.json([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 5483 } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    const requested = fetchMock.mock.calls.map((call) => call[0]?.toString() ?? '');
+    expect(requested[0]).toContain('https://meta.trac.wordpress.org/query');
+    expect(requested[1]).toBe('https://meta.trac.wordpress.org/ticket/5483?format=rss');
+    expect(requested[2]).toBe('https://api.wordpress.org/dotorg/trac/pr/?trac=meta&ticket=5483');
+    expect(result.url).toBe('https://meta.trac.wordpress.org/ticket/5483');
+  });
+
+  it.each(['65739', 'r58504', 'editor'])(
+    'surfaces an unknown instance for compatibility search %s rather than an empty result',
     async (query) => {
       vi.stubGlobal(
         'fetch',
-        vi
-          .fn<typeof fetch>()
-          .mockResolvedValue(new Response('', { status: 404, statusText: 'Not Found' }))
+        vi.fn<typeof fetch>().mockResolvedValue(
+          new Response(null, {
+            status: 301,
+            headers: { location: 'https://core.trac.wordpress.org/query' },
+          })
+        )
       );
 
       const response = await mcpRequest(
@@ -1006,13 +1497,346 @@ describe('MCP transport', () => {
           method: 'tools/call',
           params: { name: 'search', arguments: { query } },
         },
-        '/mcp/chatgpt'
+        '/mcp/xyzzy-nope/chatgpt'
       );
       const body = (await response.json()) as RpcBody;
-      const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
 
-      expect(body.result.isError).toBeUndefined();
-      expect(result).toEqual({ results: [], query, totalFound: 0 });
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content.at(0)?.text).toContain('Unknown or unavailable Trac instance');
     }
   );
+
+  it('still returns an empty compatibility search when a direct lookup simply misses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n'))
+        .mockResolvedValueOnce(new Response('', { status: 404, statusText: 'Not Found' }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: '99999999' } },
+      },
+      '/mcp/meta/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toEqual({
+      results: [],
+      query: '99999999',
+      totalFound: 0,
+    });
+  });
+
+  it('answers every method on an unroutable instance path with 404', async () => {
+    for (const method of ['POST', 'OPTIONS', 'GET']) {
+      const response = await worker.fetch(
+        new Request('https://example.com/mcp/Meta', { method }),
+        {},
+        context
+      );
+
+      expect(response.status).toBe(404);
+    }
+  });
+
+  it('refuses a search filtering on a field the routed instance does not configure', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<html><select name="add_filter_0"><option value="status">Status</option><option value="keywords">Keywords</option></select><span class="numrows">(149 matches)</span></html>'
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { component: 'Widgets' } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    const text = body.result.content.at(0)?.text ?? '';
+    expect(text).toContain('has no component field');
+    expect(text).toContain('keywords, status');
+  });
+
+  it('refuses a filter expression naming a field only other instances configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="component">Component</option><option value="status">Status</option></select><span class="numrows">(1117 matches)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { query: 'focuses~=accessibility' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('has no focuses field');
+  });
+
+  it('allows a search filtering on a field the routed instance does configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response('id,summary,component\n5483,A meta ticket,Plugin Directory')
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="component">Component</option></select><span class="numrows">(3 matches)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { component: 'Plugin Directory' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').totalFound).toBe(3);
+  });
+
+  it('fails rather than reporting a configured field as unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<html><select name="add_filter_0"><option value="component">Component</option></select><p>the option list moved</p></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTracInfo', arguments: { type: 'components' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('Trac did not return component options');
+  });
+
+  it('reads the option list whatever order Trac writes the select attributes in', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<html><select id="filter" name="add_filter_0"><option value="component">Component</option></select><select class="trac-filter" id="c" name="0_component"><option value="Editor">Editor</option></select></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTracInfo', arguments: { type: 'components' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').metadata.data).toEqual(['Editor']);
+  });
+
+  it('reports a redirect that stays on the instance as a redirect, not a missing instance', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://meta.trac.wordpress.org/maintenance' },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = tracInstance('meta');
+    if (!instance) {
+      throw new Error('meta should resolve');
+    }
+
+    await expect(
+      fetchTrac(instance, 'https://meta.trac.wordpress.org/timeline', undefined, [0])
+    ).rejects.toThrow('Unexpected redirect from https://meta.trac.wordpress.org: HTTP 302');
+  });
+
+  it('fails a filtered search when the count page cannot confirm the field exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+        .mockResolvedValueOnce(new Response('Bad Request', { status: 400 }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { component: 'Widgets' } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('Cannot confirm the component filter');
+  });
+
+  it('still degrades gracefully when the count page fails and nothing was filtered', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+        .mockResolvedValueOnce(new Response('Bad Request', { status: 400 }))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { limit: 5 } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').returned).toBe(1);
+  });
+
+  it('separates a field an instance lacks from one no ticket has a value for', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('id,milestone\n4,\n5,'))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTracInfo', arguments: { type: 'milestones' } },
+      },
+      '/mcp/gsoc'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.data).toEqual([]);
+    expect(result.text).toBe('No milestones found in Google Summer of Code Trac.');
+  });
+
+  it('follows a redirect from the linked pull request endpoint', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<?xml version="1.0"?><rss><channel><description>Ticket description</description></channel></rss>'
+        )
+      )
+      .mockResolvedValueOnce(Response.json([linkedPullRequestFixture()]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65808 } },
+    });
+
+    expect(fetchMock.mock.calls[2]?.[0]?.toString()).toContain('api.wordpress.org');
+    expect(fetchMock.mock.calls[2]?.[1]?.redirect).toBeUndefined();
+  });
+
+  it('reports a field the routed instance does not configure as unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<html><body><select name="add_filter_0"><option value="status">Status</option></select></body></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTracInfo', arguments: { type: 'severities' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(body.result.isError).toBeUndefined();
+    expect(result.metadata.data).toEqual([]);
+    expect(result.text).toBe('Severities are not available in Making WordPress.org Trac.');
+  });
+
+  it('still fails when a field page is not a Trac query page at all', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('<html><body>Maintenance</body></html>'))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTracInfo', arguments: { type: 'severities' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text).toContain('Trac did not return severity options');
+  });
 });
