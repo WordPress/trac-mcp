@@ -122,6 +122,13 @@ describe('Trac parsing', () => {
     expect(() => parseTicketFilter('status<>closed')).toThrow('field!=value');
   });
 
+  it('passes native Trac spellings and values containing = through unchanged', () => {
+    expect(parseTicketFilter('status=!closed')).toEqual(['status', '!closed']);
+    expect(parseTicketFilter('summary=~composer')).toEqual(['summary', '~composer']);
+    expect(parseTicketFilter('description~=key=value')).toEqual(['description', '~key=value']);
+    expect(parseTicketFilter('summary!=a=b')).toEqual(['summary', '!a=b']);
+  });
+
   it('accepts order and desc as sort controls', () => {
     const url = new URL('https://core.trac.wordpress.org/query');
     addTicketSearchQuery(url, 'component=Editor&order=changetime&desc=1&order=priority');
