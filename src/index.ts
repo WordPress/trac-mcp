@@ -36,7 +36,7 @@ const GetChangesetArgsSchema = z.object({
 // default max_daysback of 90; wider requests silently lose the oldest events.
 const TIMELINE_MAX_WINDOW_DAYS = 90;
 const TIMELINE_DEFAULT_WINDOW_DAYS = 7;
-// The timeline feed honours max up to 1001. One generous fetch covers far more
+// The timeline feed honors max up to 1001. One generous fetch covers far more
 // than a busy core.trac day, and the day-based coverage report below stays
 // honest when it is not enough.
 const TIMELINE_FETCH_MAX = 500;
@@ -2003,10 +2003,7 @@ async function getChangesetForChatGPT(
 }
 
 async function getTimelineForChatGPT(instance: TracInstance, days: number, limit: number) {
-  const { results } = await fetchTimeline(
-    instance,
-    resolveTimelineQuery(GetTimelineArgsSchema.parse({ days, limit }), timelineDay(Date.now()))
-  );
+  const { results } = await fetchLegacyTimeline(instance, days, limit);
   return { results };
 }
 
