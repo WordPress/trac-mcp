@@ -92,7 +92,8 @@ point without one. Relative Trac links resolve against the instance you connecte
 
 ### Search filters
 
-`searchTickets` accepts plain keywords, ticket numbers, or filter expressions joined with `&`:
+`searchTickets` accepts plain keywords, ticket numbers, or filter expressions joined with `&`.
+Plain keywords match the ticket summary only; use `description~=text` to search ticket bodies.
 
 ```json
 {
@@ -102,14 +103,17 @@ point without one. Relative Trac links resolve against the instance you connecte
 }
 ```
 
-Expressions take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not
-contain. Repeat a field to OR its values, with the same operator each time. Add `order=<column>`
-and `desc=1` to sort, for example
-`component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are the ticket
-columns plus `time` and `changetime`.
+Expressions can name `summary`, `description`, `owner`, `reporter`, `type`, `status`, `priority`,
+`milestone`, `component`, `version`, `severity`, `resolution`, `keywords`, `cc`, or `focuses`, and
+take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not contain. Repeat
+a field to OR its values (`status=new&status=assigned`), with the same operator each time. Add `order=<column>` and `desc=1` to
+sort, for example `component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are
+the fields above plus `time` and `changetime`. Field values differ by instance: `getTracInfo`
+lists the components, milestones, priorities, severities, types, and statuses each one configures.
 
-It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
-separate argument overrides the same field in `query`. Results include pagination metadata.
+It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. Each
+is an exact match on one value and overrides the same field in `query`; the expression form is
+the one to use for substring, OR, or negation. Results include pagination metadata.
 
 ### Timeline ranges, authors, and coverage
 
