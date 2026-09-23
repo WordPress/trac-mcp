@@ -80,6 +80,10 @@ ticket and an `r` prefix for a changeset: `65739` and `r58504`.
 No tool takes a Trac instance argument. The endpoint you connect to decides which Trac the tools
 read.
 
+Ticket and changeset text is plain text with one exception: links are kept as `<a href="...">`
+with an absolute URL, because a comment that points at a pull request or another ticket loses its
+point without one. Relative Trac links resolve against the instance you connected to.
+
 ### Search filters
 
 `searchTickets` accepts plain keywords, ticket numbers, or filter expressions joined with `&`:
