@@ -60,7 +60,7 @@ The standard `/mcp` endpoint provides:
 | Tool | Purpose |
 | --- | --- |
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
-| `getTicket` | Read a ticket, its attachments, changesets, recent human discussion, and linked pull requests |
+| `getTicket` | Read a ticket, its attachments, changesets, human discussion, and linked pull requests. `commentLimit` returns the newest comments, up to 500, and the result reports `totalComments` and `returnedComments` |
 | `getChangeset` | Read a changeset and an optional truncated diff |
 | `getTimeline` | Read recent Trac activity |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
