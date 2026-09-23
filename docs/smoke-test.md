@@ -73,7 +73,10 @@ Use these public fixtures only. Each one is here because it covers a distinct pa
 | `65808` | Linked pull request data present |
 | `65793` | Linked PR with no reviews; attachments kept separate from comments |
 | `62358` | Linked PR with no checks; changesets kept separate from comments |
+| `51407` | Escaped markup in a description; the text `<script>` inside a code span |
+| `59446` | Links in a description and in comments; comments 1 and 7 are bot comments listed under `omittedComments` |
 | `r58504` | Changeset, with and without its diff |
+| `r62723` | Escaped markup in a changeset message; the same `<script>` text |
 | January 2005, author `saxmatt` | Timeline history that cannot come from recent activity, and a window large enough to force a continuation |
 | `99999999` | Nonexistent ticket and revision; the `not_found` tool error path |
 
@@ -85,8 +88,11 @@ call /mcp getTicket '{"id":65739,"includeComments":true}'
 call /mcp getTicket '{"id":65808}'
 call /mcp getTicket '{"id":65793}'
 call /mcp getTicket '{"id":62358}'
+call /mcp getTicket '{"id":51407,"includeComments":false}'
+call /mcp getTicket '{"id":59446,"includeComments":true,"commentLimit":20}'
 call /mcp getChangeset '{"revision":58504,"includeDiff":false}'
 call /mcp getChangeset '{"revision":58504,"includeDiff":true,"diffLimit":500}'
+call /mcp getChangeset '{"revision":62723,"includeDiff":false}'
 call /mcp getTimeline '{"days":7,"limit":5}'
 call /mcp getTimeline '{"from":"2005-01-01","to":"2005-01-31","author":"saxmatt","limit":20}'
 call /mcp getTracInfo '{"type":"components"}'
@@ -100,6 +106,9 @@ What to look for:
 - `getTicket` returns `id`, `title`, `text`, `url`, and `metadata`. With comments requested, `metadata` carries `comments`, `returnedComments`, and `totalComments`.
 - Tickets `65808`, `65793`, and `62358` each carry `metadata.linkedPullRequests`. `65793` also carries `metadata.attachments`, and `62358` also carries `metadata.changesets`, neither of them folded into the comment list.
 - `getChangeset` returns the revision, author, date, message, and file list. With `includeDiff`, the text includes diff hunks and respects `diffLimit`.
+- Ticket `59446` keeps its links as `<a href="...">` with absolute URLs. Its description links to an "existing PR" on GitHub and to an "example plugin". Text without the surrounding tag means links are being stripped again.
+- Ticket `51407` and changeset `r62723` both contain the literal text `<script>`, written on Trac inside a code span. Trac escapes it once for HTML and, in RSS, once more for XML. A missing `<script>` means the parser decoded a level too many before stripping tags and deleted the result.
+- `getTimeline` returns recent events, and `getTracInfo` returns the requested vocabulary. A seven day window is used because a quiet day can legitimately produce no events. An empty list is a valid answer for any short window, so judge this check on the request succeeding rather than on the count.
 - The recent `getTimeline` call keeps the original response shape: it returns `results`, `totalEvents`, `daysBack`, and `timelineUrl`, and `totalEvents` is at most the requested `limit` of 5. A seven day window is used because a quiet day can legitimately produce no events. An empty list is a valid answer for any short window, so judge this check on the request succeeding rather than on the count. `getTracInfo` returns the requested vocabulary.
 - The historical `getTimeline` call proves the server answers from the requested range rather than from recent activity: every event carries `saxmatt` as `metadata.author` with a January 2005 date. January 2005 is immutable history, so this call should never legitimately come back empty.
 - That same call shows the coverage envelope. `requested` is the window that was asked for, `covered` is a whole-day window inside it, `complete` is `false` because the month holds more events than `limit`, and `continueWith.to` is the day before `covered.from`. `continueWith` also preserves `author` as `saxmatt` and `limit` as `20`, so it is the complete next request. `returned` counts the events in `results`, `authors` lists `saxmatt`, and `note` describes the coverage in words. No `page`, `pageSize`, `hasMore`, `nextPage`, `totalEvents`, `returnedEvents`, or `daysBack` field should appear.

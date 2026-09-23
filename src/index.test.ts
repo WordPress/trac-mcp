@@ -185,8 +185,53 @@ afterEach(() => {
 });
 
 describe('Trac parsing', () => {
-  it('cleans nested HTML entities and invisible characters', () => {
-    expect(cleanTracText('&lt;p&gt;It&#39;s clean&lt;/p&gt;\u200B')).toBe("It's clean");
+  it('strips tags and decodes HTML entities and invisible characters', () => {
+    expect(cleanTracText('<p>It&#39;s clean</p>\u200B', CORE_TRAC.origin)).toBe("It's clean");
+  });
+
+  it('keeps escaped markup in a code span as text', () => {
+    expect(cleanTracText('<p>Use <code>&lt;script&gt;</code> here.</p>', CORE_TRAC.origin)).toBe(
+      'Use <script> here.'
+    );
+  });
+
+  it('keeps an external link without its class or icon span', () => {
+    expect(
+      cleanTracText(
+        '<p>See the <a class="ext-link" href="https://example.org/plugin"><span class="icon">\u200B</span>example plugin</a>.</p>',
+        CORE_TRAC.origin
+      )
+    ).toBe('See the <a href="https://example.org/plugin">example plugin</a>.');
+  });
+
+  it('keeps an internal ticket link without its class or title', () => {
+    expect(
+      cleanTracText(
+        '<p>In <a class="closed ticket" href="/ticket/58664" title="defect (bug): Adopt script helpers (closed: fixed)">#58664</a>.</p>',
+        CORE_TRAC.origin
+      )
+    ).toBe('In <a href="https://core.trac.wordpress.org/ticket/58664">#58664</a>.');
+  });
+
+  it('resolves a relative href from a field change against the instance', () => {
+    expect(
+      cleanTracText(
+        '<li><strong>description</strong> modified (<a href="/ticket/59446?action=diff&amp;version=6">diff</a>)</li>',
+        CORE_TRAC.origin
+      )
+    ).toBe(
+      '- description modified (<a href="https://core.trac.wordpress.org/ticket/59446?action=diff&version=6">diff</a>)'
+    );
+  });
+
+  it('unwraps an anchor whose href is not an http or https URL', () => {
+    expect(cleanTracText('<p><a href="javascript:alert(1)">run</a> it</p>', CORE_TRAC.origin)).toBe(
+      'run it'
+    );
+  });
+
+  it('drops an anchor that carries no href', () => {
+    expect(cleanTracText('<p><a name="top"></a>Top</p>', CORE_TRAC.origin)).toBe('Top');
   });
 
   it('parses quoted CSV fields', () => {
@@ -202,6 +247,48 @@ describe('Trac parsing', () => {
     expect(url.searchParams.get('summary')).toBe('~composer');
     expect(url.searchParams.get('status')).toBe('closed');
     expect(() => parseTicketFilter('bogusfield~=value')).toThrow('Unsupported ticket filter');
+  });
+
+  it('maps negation operators onto the value prefixes Trac reads', () => {
+    expect(parseTicketFilter('status!=closed')).toEqual(['status', '!closed']);
+    expect(parseTicketFilter('keywords!~=needs-patch')).toEqual(['keywords', '!~needs-patch']);
+    expect(() => parseTicketFilter('status<>closed')).toThrow('field!=value');
+  });
+
+  it('passes native Trac spellings and values containing = through unchanged', () => {
+    expect(parseTicketFilter('status=!closed')).toEqual(['status', '!closed']);
+    expect(parseTicketFilter('summary=~composer')).toEqual(['summary', '~composer']);
+    expect(parseTicketFilter('description~=key=value')).toEqual(['description', '~key=value']);
+    expect(parseTicketFilter('summary!=a=b')).toEqual(['summary', '!a=b']);
+  });
+
+  it('accepts order and desc as sort controls', () => {
+    const url = new URL('https://core.trac.wordpress.org/query');
+    addTicketSearchQuery(url, 'component=Editor&order=changetime&desc=1&order=priority');
+
+    expect(url.searchParams.getAll('component')).toEqual(['Editor']);
+    expect(url.searchParams.getAll('order')).toEqual(['priority']);
+    expect(url.searchParams.get('desc')).toBe('1');
+    expect(() => parseTicketFilter('order=bogus')).toThrow('Unsupported sort column');
+    expect(() => parseTicketFilter('order~=changetime')).toThrow('Unsupported sort column');
+    expect(() => parseTicketFilter('desc=yes')).toThrow('Unsupported desc value');
+  });
+
+  it('rejects repeated filters on one field with different operators', () => {
+    const url = new URL('https://core.trac.wordpress.org/query');
+    addTicketSearchQuery(
+      url,
+      'status=new&status=assigned&keywords=!has-patch&keywords!=needs-patch'
+    );
+    expect(url.searchParams.getAll('status')).toEqual(['new', 'assigned']);
+    expect(url.searchParams.getAll('keywords')).toEqual(['!has-patch', '!needs-patch']);
+
+    expect(() =>
+      addTicketSearchQuery(
+        new URL('https://core.trac.wordpress.org/query'),
+        'status!=closed&status=new'
+      )
+    ).toThrow('same operator');
   });
 });
 
@@ -385,6 +472,34 @@ describe('MCP transport', () => {
     expect(body.result.isError).toBe(true);
     expect(result.code).toBe('upstream_error');
     expect(result.error).toContain('Forbidden');
+  });
+
+  it('accepts a commentLimit of 500 and rejects 501', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('Not Found', { status: 404 }))
+    );
+
+    const accepted = (await (
+      await mcpRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 500 } },
+      })
+    ).json()) as RpcBody;
+    const rejected = (await (
+      await mcpRequest({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 501 } },
+      })
+    ).json()) as RpcBody;
+
+    expect(accepted.error).toBeUndefined();
+    expect(accepted.result.isError).toBe(true);
+    expect(rejected.error.code).toBe(-32602);
   });
 
   it.each([7, 1])(
@@ -957,12 +1072,14 @@ describe('MCP transport', () => {
     const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
       <description>Ticket description</description>
       <item><dc:creator>contributor</dc:creator><pubDate>Mon, 03 Aug 2026 10:42:01 GMT</pubDate><title>attachment set</title><link>https://core.trac.wordpress.org/ticket/65793</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;attachment&lt;/strong&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;01 example.png&lt;/span&gt;&lt;/li&gt;&lt;/ul&gt;</description></item>
-      <item><dc:creator>committer</dc:creator><pubDate>Thu, 07 Nov 2024 16:03:41 GMT</pubDate><title>status changed; resolution set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; closed&lt;/li&gt;&lt;li&gt;&lt;strong&gt;resolution&lt;/strong&gt; fixed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;In &lt;a class=&quot;changeset&quot; href=&quot;https://core.trac.wordpress.org/changeset/59369&quot;&gt;59369&lt;/a&gt;:&lt;/p&gt;&lt;div class=&quot;message&quot;&gt;&lt;p&gt;Backport message.&lt;/p&gt;&lt;/div&gt;</description></item>
+      <item><dc:creator>committer</dc:creator><pubDate>Thu, 07 Nov 2024 16:03:41 GMT</pubDate><title>status changed; resolution set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt;         &lt;span class=&quot;trac-field-old&quot;&gt;new&lt;/span&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;closed&lt;/span&gt;           &lt;/li&gt;&lt;li&gt;&lt;strong&gt;resolution&lt;/strong&gt;         → &lt;span class=&quot;trac-field-new&quot;&gt;fixed&lt;/span&gt;           &lt;/li&gt;&lt;/ul&gt;&lt;p&gt;In &lt;a class=&quot;changeset&quot; href=&quot;https://core.trac.wordpress.org/changeset/59369&quot;&gt;59369&lt;/a&gt;:&lt;/p&gt;&lt;div class=&quot;message&quot;&gt;&lt;p&gt;Backport message.&lt;/p&gt;&lt;/div&gt;</description></item>
       <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:5</link><description>&lt;p&gt;Useful review comment.&lt;/p&gt;</description></item>
       <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title>keywords set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:6</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; needs-testing added&lt;/li&gt;&lt;/ul&gt;</description></item>
       <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:02:00 GMT</pubDate><title>description changed</title><link>https://core.trac.wordpress.org/ticket/65793#description</link><description>&lt;p&gt;Ticket description repeated.&lt;/p&gt;</description></item>
       <item><dc:creator>slackbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:03:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:7</link><description>&lt;p&gt;Slack mention.&lt;/p&gt;</description></item>
       <item><dc:creator>prbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:04:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:8</link><description>&lt;p&gt;Pull request relay.&lt;/p&gt;</description></item>
+      <item><dc:creator>watcher</dc:creator><pubDate>Wed, 05 Aug 2026 19:05:00 GMT</pubDate><title>cc set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:9</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;cc&lt;/strong&gt; watcher added&lt;/li&gt;&lt;/ul&gt;</description></item>
+      <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:06:00 GMT</pubDate><title>description changed</title><link>https://core.trac.wordpress.org/ticket/65793#comment:10</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;description&lt;/strong&gt; modified (&lt;a href=&quot;/ticket/65793?action=diff&amp;amp;version=2&quot;&gt;diff&lt;/a&gt;)&lt;/li&gt;&lt;/ul&gt;</description></item>
     </channel></rss>`;
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -976,7 +1093,7 @@ describe('MCP transport', () => {
       method: 'tools/call',
       params: {
         name: 'getTicket',
-        arguments: { id: 65793, includeComments: true, commentLimit: 1 },
+        arguments: { id: 65793, includeComments: true, commentLimit: 2 },
       },
     });
     const body = (await response.json()) as RpcBody;
@@ -991,20 +1108,185 @@ describe('MCP transport', () => {
     expect(result.metadata.changesets).toEqual([
       expect.objectContaining({
         revision: 59369,
+        changes: 'status: new → closed; resolution: fixed',
         message: 'Backport message.',
         url: 'https://core.trac.wordpress.org/changeset/59369',
       }),
     ]);
     expect(result.metadata.comments).toEqual([
-      expect.objectContaining({ id: 5, author: 'reviewer', comment: 'Useful review comment.' }),
+      expect.objectContaining({
+        id: 6,
+        author: 'reviewer',
+        changes: 'keywords: needs-testing added',
+        comment: '',
+      }),
+      expect.objectContaining({
+        id: 10,
+        author: 'reporter',
+        changes:
+          'description: modified (<a href="https://core.trac.wordpress.org/ticket/65793?action=diff&version=2">diff</a>)',
+        comment: '',
+      }),
     ]);
-    expect(result.metadata.totalComments).toBe(1);
+    expect(result.metadata.totalComments).toBe(3);
+    expect(result.metadata.omittedComments).toEqual([
+      { id: 7, author: 'slackbot', reason: 'bot' },
+      { id: 8, author: 'prbot', reason: 'bot' },
+      { id: 9, author: 'watcher', reason: 'cc' },
+    ]);
     expect(result.text).toContain('Attachments:');
     expect(result.text).toContain('Changesets:');
     expect(result.text).toContain('Recent comments:');
+    expect(result.text).toContain(
+      'Omitted comments: 7 (slackbot, bot); 8 (prbot, bot); 9 (watcher, cc)'
+    );
     expect(result.text).not.toContain('Slack mention.');
     expect(result.text).not.toContain('Pull request relay.');
     expect(result.text).not.toContain('Ticket description repeated.');
+  });
+
+  it('keeps a bulleted list in a plain comment as prose, not field changes', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>Ticket description</description>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:3</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; should stay open&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;My recommendation.&lt;/p&gt;</description></item>
+      <item><dc:creator>watcher</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title>cc changed</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;p&gt;&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65793,Accessibility ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 65793, includeComments: true } },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({
+        id: 3,
+        changes: '',
+        comment: '- status should stay open\n\nMy recommendation.',
+      }),
+    ]);
+    expect(result.metadata.omittedComments).toEqual([{ id: 4, author: 'watcher', reason: 'cc' }]);
+  });
+
+  it('classifies custom-field, empty, mixed-cc, and bot-authored history entries', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>Ticket description</description>
+      <item><dc:creator>triager</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title>customfield set</title><link>https://meta.trac.wordpress.org/ticket/5483#comment:10</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;customfield&lt;/strong&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;x&lt;/span&gt;&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;note&lt;/p&gt;</description></item>
+      <item><dc:creator>someone</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title></title><link>https://meta.trac.wordpress.org/ticket/5483#comment:11</link><description>&lt;p&gt;&lt;/p&gt;</description></item>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:02:00 GMT</pubDate><title>cc, keywords changed</title><link>https://meta.trac.wordpress.org/ticket/5483#comment:12</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;cc&lt;/strong&gt; reviewer added&lt;/li&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; needs-patch added&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Needs a patch.&lt;/p&gt;</description></item>
+      <item><dc:creator>prbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:03:00 GMT</pubDate><title>keywords changed</title><link>https://meta.trac.wordpress.org/ticket/5483#comment:13</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; has-patch added; needs-patch removed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;&lt;em&gt;This ticket was mentioned in PR #1.&lt;/em&gt;&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n5483,A meta ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 5483, includeComments: true } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({ id: 10, changes: 'customfield set' }),
+      expect.objectContaining({
+        id: 12,
+        changes: 'keywords: needs-patch added',
+        comment: 'Needs a patch.',
+      }),
+    ]);
+    expect(result.metadata.comments[0].comment).toContain('customfield');
+    expect(result.metadata.comments[0].comment).toContain('note');
+    expect(result.metadata.omittedComments).toEqual([
+      { id: 11, author: 'someone', reason: 'empty' },
+      { id: 13, author: 'prbot', reason: 'bot' },
+    ]);
+  });
+
+  it('keeps escaped markup in the description and in comments', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>&lt;p&gt;Sample: &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;&lt;/p&gt;</description>
+      <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title>status changed</title><link>https://core.trac.wordpress.org/ticket/51407#comment:2</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; closed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Also &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;.&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n51407,Script tag ticket,closed'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'getTicket',
+        arguments: { id: 51407, includeComments: true, commentLimit: 10 },
+      },
+    });
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.text).toContain('Sample: <script>');
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({ id: 2, comment: 'Also <script>.' }),
+    ]);
+  });
+
+  it('keeps comment links and resolves relative ones against the connected instance', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>&lt;p&gt;See &lt;a class=&quot;ext-link&quot; href=&quot;https://github.com/WordPress/wordpress-develop/pull/1&quot;&gt;&lt;span class=&quot;icon&quot;&gt;​&lt;/span&gt;existing PR&lt;/a&gt;.&lt;/p&gt;</description>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://meta.trac.wordpress.org/ticket/5483#comment:1</link><description>&lt;p&gt;Also &lt;a class=&quot;closed ticket&quot; href=&quot;/ticket/5480&quot; title=&quot;defect: something (closed: fixed)&quot;&gt;#5480&lt;/a&gt;.&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n5483,Meta ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 5483, includeComments: true } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.text).toContain(
+      'See <a href="https://github.com/WordPress/wordpress-develop/pull/1">existing PR</a>.'
+    );
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({
+        comment: 'Also <a href="https://meta.trac.wordpress.org/ticket/5480">#5480</a>.',
+      }),
+    ]);
   });
 
   it('requires an r prefix for changesets on the compatibility endpoint', async () => {
@@ -1576,6 +1858,66 @@ describe('Trac instance routing', () => {
     const text = body.result.content.at(0)?.text ?? '';
     expect(text).toContain('has no component field');
     expect(text).toContain('keywords, status');
+  });
+
+  it('does not treat sort controls as filter fields the instance must configure', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<html><select name="add_filter_0"><option value="status">Status</option></select><span class="numrows">(1 match)</span></html>'
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'searchTickets',
+          arguments: { query: 'status!=closed&order=changetime&desc=1' },
+        },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    const requested = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(requested.searchParams.get('status')).toBe('!closed');
+    expect(requested.searchParams.get('order')).toBe('changetime');
+    expect(requested.searchParams.get('desc')).toBe('1');
+  });
+
+  it('refuses a sort on a column the routed instance does not configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="status">Status</option></select><span class="numrows">(1 match)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { query: 'order=severity' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text ?? '').toContain('has no severity field to sort by');
   });
 
   it('refuses a filter expression naming a field only other instances configure', async () => {

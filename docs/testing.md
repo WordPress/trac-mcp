@@ -32,6 +32,8 @@ Start the Worker by following [local-development.md](local-development.md), then
    - Read ticket `65808` and confirm its linked pull request data is present.
    - Read ticket `65793`; confirm linked pull request data remains available with no reviews and attachments are separate from comments.
    - Read ticket `62358`; confirm linked pull request data remains available with no checks and changesets are separate from comments.
+   - Read ticket `59446` with comments; confirm the description and comments keep `<a href>` links with absolute URLs.
+   - Read ticket `51407` and changeset `62723`; confirm the literal text `<script>` survives in both. Trac escapes it once for HTML and again for RSS, and decoding a level too many turns it into a tag the stripper removes.
    - Read changeset `58504` with and without its diff.
    - Read seven days of timeline activity. Confirm this call keeps the original `totalEvents` and `daysBack` response contract and that the strict event limit is applied. A short window can legitimately be empty, so judge this on the request succeeding rather than on the count.
    - Read a historical timeline range filtered to one author, using a range from January 2005 so the result cannot come from recent activity, and ask for less than the window holds so the first response cannot be complete. Every event should carry that author with a January 2005 date, `covered` should be a whole-day window inside `requested`, `complete` should be `false`, and `continueWith` should resume on the day before `covered` begins.

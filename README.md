@@ -60,10 +60,16 @@ The standard `/mcp` endpoint provides:
 | Tool | Purpose |
 | --- | --- |
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
-| `getTicket` | Read a ticket, its attachments, changesets, recent human discussion, and linked pull requests |
+| `getTicket` | Read a ticket, its attachments, changesets, human discussion, and linked pull requests. `commentLimit` returns the newest comments, up to 500, and the result reports `totalComments` and `returnedComments` |
 | `getChangeset` | Read a changeset and an optional truncated diff |
 | `getTimeline` | Read Trac activity for recent days or a historical date range, with author filtering and day-granular coverage |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
+
+`getTicket` leaves bot comments, cc-only changes, and entries with neither a change nor text out of
+`comments` and lists each one under `omittedComments` with its ID, author, and reason (`bot`, `cc`,
+or `empty`), so a gap in the comment numbering is explained rather than mistaken for truncation.
+Every other field change a person makes is reported in `changes` with its values, including keyword
+edits and description edits with their diff link.
 
 `getChangeset` expects the numeric `revision` argument, not `rev`:
 
@@ -80,6 +86,10 @@ ticket and an `r` prefix for a changeset: `65739` and `r58504`.
 No tool takes a Trac instance argument. The endpoint you connect to decides which Trac the tools
 read.
 
+Ticket and changeset text is plain text with one exception: links are kept as `<a href="...">`
+with an absolute URL, because a comment that points at a pull request or another ticket loses its
+point without one. Relative Trac links resolve against the instance you connected to.
+
 ### Search filters
 
 `searchTickets` accepts plain keywords, ticket numbers, or filter expressions joined with `&`:
@@ -91,6 +101,12 @@ read.
   "page": 2
 }
 ```
+
+Expressions take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not
+contain. Repeat a field to OR its values, with the same operator each time. Add `order=<column>`
+and `desc=1` to sort, for example
+`component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are the ticket
+columns plus `time` and `changetime`.
 
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
 separate argument overrides the same field in `query`. Results include pagination metadata.

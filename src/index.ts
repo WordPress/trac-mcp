@@ -4,7 +4,7 @@ import { z } from 'zod';
 const JsonRpcRequestSchema = z.object({
   jsonrpc: z.literal('2.0'),
   method: z.string(),
-  params: z.record(z.unknown()).optional(),
+  params: z.record(z.string(), z.unknown()).optional(),
   id: z.union([z.string(), z.number()]).optional(),
 });
 type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
@@ -22,10 +22,12 @@ const SearchTicketsArgsSchema = z.object({
   milestone: z.string().max(100).optional(),
   resolution: z.string().max(100).optional(),
 });
+// The whole ticket RSS is fetched before slicing, so the cap only bounds response size.
+const TICKET_COMMENT_LIMIT_MAX = 500;
 const GetTicketArgsSchema = z.object({
   id: z.number().int().positive(),
   includeComments: z.boolean().default(true),
-  commentLimit: z.number().int().min(0).max(50).default(10),
+  commentLimit: z.number().int().min(0).max(TICKET_COMMENT_LIMIT_MAX).default(10),
 });
 const GetChangesetArgsSchema = z.object({
   revision: z.number().int().positive(),
@@ -154,8 +156,8 @@ const LinkedPullRequestSchema = z.object({
     html_url: z.string().url(),
   }),
   touches_tests: z.boolean(),
-  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string())),
-  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.array(z.string()))),
+  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string(), z.string())),
+  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.string(), z.array(z.string()))),
   mergeable_state: z.string(),
   body: z.string().nullable(),
   html_url: z.string().url(),
@@ -405,6 +407,13 @@ type TicketHistoryEntry = {
   url: string;
 };
 
+// A numbered history entry left out of comments, so a gap in the IDs is explained.
+type OmittedTicketComment = {
+  id: number;
+  author: string;
+  reason: 'bot' | 'cc' | 'empty';
+};
+
 type LinkedPullRequest = {
   number: number;
   repository: string;
@@ -443,52 +452,51 @@ type TicketChangeset = {
   url: string;
 };
 
-const HTML_ENTITIES: Record<string, string> = {
+/*
+ * Trac escapes its content once per format it passes through. An RSS item body is HTML
+ * escaped as XML, so `<code>&lt;script&gt;</code>` arrives as
+ * `&lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;`. Each level is undone by exactly one
+ * pass of the matching decoder, in order: XML when the item is read, HTML after the tags
+ * are stripped. Decoding twice, or decoding before stripping, turns escaped markup into a
+ * tag and the tag stripper then deletes it.
+ */
+const XML_ENTITIES: Record<string, string> = {
   amp: '&',
   apos: "'",
   gt: '>',
   lt: '<',
-  nbsp: ' ',
   quot: '"',
 };
 
-function decodeHtmlEntity(entity: string, code: string): string {
-  if (code[0] !== '#') {
-    return HTML_ENTITIES[code.toLowerCase()] ?? entity;
-  }
+const HTML_ENTITIES: Record<string, string> = { ...XML_ENTITIES, nbsp: ' ' };
 
-  const radix = code[1]?.toLowerCase() === 'x' ? 16 : 10;
-  const digits = radix === 16 ? code.slice(2) : code.slice(1);
-  const point = Number.parseInt(digits, radix);
-  return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
-    ? String.fromCodePoint(point)
-    : entity;
+const ENTITY_REFERENCE = /&(#x[\da-f]+|#\d+|[a-z]+);/gi;
+
+function decodeEntities(value: string, named: Record<string, string>): string {
+  return value.replace(ENTITY_REFERENCE, (entity: string, code: string) => {
+    if (code[0] !== '#') {
+      return named[code.toLowerCase()] ?? entity;
+    }
+
+    const radix = code[1]?.toLowerCase() === 'x' ? 16 : 10;
+    const digits = radix === 16 ? code.slice(2) : code.slice(1);
+    const point = Number.parseInt(digits, radix);
+    return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+      ? String.fromCodePoint(point)
+      : entity;
+  });
+}
+
+function decodeXmlEntities(value: string): string {
+  return decodeEntities(value, XML_ENTITIES);
 }
 
 function decodeHtmlEntities(value: string): string {
-  let decoded = value;
-  for (let pass = 0; pass < 3; pass++) {
-    const next = decoded.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, decodeHtmlEntity);
-
-    if (next === decoded) {
-      break;
-    }
-    decoded = next;
-  }
-
-  return decoded;
+  return decodeEntities(value, HTML_ENTITIES);
 }
 
-export function cleanTracText(value: string): string {
-  let text = value.replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, '$1').replace(/^\uFEFF/, '');
-
-  text = decodeHtmlEntities(text)
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(?:div|li|ol|p|pre|tr|ul)>/gi, '\n')
-    .replace(/<li[^>]*>/gi, '- ')
-    .replace(/<[^>]*>/g, '');
-
-  return decodeHtmlEntities(text)
+function normalizeTracText(value: string): string {
+  return value
     .replace(/[\u200B\uFEFF]/g, '')
     .replace(/\r/g, '')
     .replace(/[ \t]+\n/g, '\n')
@@ -497,21 +505,86 @@ export function cleanTracText(value: string): string {
     .trim();
 }
 
+/*
+ * Trac decorates every link it renders: `class` for styling, `title` with a summary of the
+ * target, and an empty `<span class="icon">` before external link text. None of that helps a
+ * reader, so only the href is kept. Hrefs stay entity-encoded here because the whole text is
+ * decoded once at the end.
+ */
+function rewriteAnchor(tag: string, origin: string): string {
+  const href = tag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
+  const target = href?.[1] ?? href?.[2] ?? href?.[3];
+  if (!target) {
+    return '';
+  }
+
+  try {
+    const url = new URL(target, origin);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? `<a href="${url.href}">` : '';
+  } catch {
+    return '';
+  }
+}
+
+/*
+ * Takes an HTML fragment and returns text, keeping links as `<a href>` with an absolute URL.
+ * Agents read HTML, and a Trac comment that points at a pull request or another ticket loses
+ * its point when the URL goes. Callers reading RSS must decode the XML level first, which
+ * `readXmlText` does.
+ */
+export function cleanTracText(html: string, origin: string): string {
+  const anchors: boolean[] = [];
+  const text = html
+    .replace(/<span\s[^>]*class=["']?icon["']?[^>]*>[\s\S]*?<\/span>/gi, '')
+    .replace(/<[^>]*>/g, (tag) => {
+      if (/^<br\s*\/?>$/i.test(tag)) {
+        return '\n';
+      }
+      if (/^<\/(?:div|li|ol|p|pre|tr|ul)>$/i.test(tag)) {
+        return '\n';
+      }
+      if (/^<li[\s>]/i.test(tag)) {
+        return '- ';
+      }
+      if (/^<a[\s>]/i.test(tag)) {
+        const anchor = rewriteAnchor(tag, origin);
+        anchors.push(anchor !== '');
+        return anchor;
+      }
+      // An unbalanced `</a>` closes nothing; drop it with the rest of the markup.
+      if (/^<\/a\s*>$/i.test(tag)) {
+        return anchors.pop() ? '</a>' : '';
+      }
+      return '';
+    });
+
+  return normalizeTracText(decodeHtmlEntities(text));
+}
+
 function extractXmlElement(source: string, tag: string): string {
   const match = source.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i'));
   return match?.[1] ?? '';
 }
 
-function parseRssItems(rssText: string) {
+// One XML decode, or none at all when the element carries its content as CDATA.
+function readXmlText(source: string, tag: string): string {
+  const raw = extractXmlElement(source, tag);
+  const cdata = raw.match(/^\s*<!\[CDATA\[([\s\S]*)\]\]>\s*$/);
+  return cdata?.[1] ?? decodeXmlEntities(raw);
+}
+
+function parseRssItems(rssText: string, origin: string) {
   return Array.from(rssText.matchAll(/<item>([\s\S]*?)<\/item>/gi), (match) => {
     const item = match[1] ?? '';
+    const descriptionHtml = readXmlText(item, 'description');
     return {
-      title: cleanTracText(extractXmlElement(item, 'title')),
-      link: cleanTracText(extractXmlElement(item, 'link')),
-      description: cleanTracText(extractXmlElement(item, 'description')),
-      rawDescription: extractXmlElement(item, 'description'),
-      date: cleanTracText(extractXmlElement(item, 'pubDate')),
-      author: cleanTracText(extractXmlElement(item, 'dc:creator')),
+      // Trac writes these four as plain text, so the XML decode leaves nothing to strip.
+      title: normalizeTracText(readXmlText(item, 'title')),
+      link: normalizeTracText(readXmlText(item, 'link')),
+      date: normalizeTracText(readXmlText(item, 'pubDate')),
+      author: normalizeTracText(readXmlText(item, 'dc:creator')),
+      description: cleanTracText(descriptionHtml, origin),
+      descriptionHtml,
     };
   });
 }
@@ -535,30 +608,48 @@ const TICKET_FIELDS = new Set([
   'version',
 ]);
 
-function splitTicketHistoryDescription(rawDescription: string) {
-  const html = decodeHtmlEntities(rawDescription);
-  const list = html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i);
+type TicketFieldChange = { field: string; value: string };
+
+// Trac's RSS title names the fields an entry changed; a comment with no changes has an empty
+// title, so a bulleted list there is prose and not a change list.
+function splitTicketHistoryDescription(html: string, origin: string, title: string) {
+  const list = title.trim() ? html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i) : null;
   if (!list?.[0] || !list[1]) {
-    return { html, body: cleanTracText(html) };
+    return { html, body: cleanTracText(html, origin) };
   }
 
-  const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi), (match) =>
-    match[0]
-      .match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>/i)?.[1]
-      ?.trim()
-      .toLowerCase()
-  );
+  const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>([\s\S]*?)<\/li>/gi), (match) => {
+    const label = (match[1] ?? '').match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>([\s\S]*)$/i);
+    return {
+      field: label?.[1]?.trim().toLowerCase() ?? '',
+      // A field set for the first time renders as "→ new"; the arrow says nothing on its own.
+      value: cleanTracText(label?.[2] ?? '', origin).replace(/^→\s*/, ''),
+    };
+  });
   const unmatched = list[1].replace(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi, '').trim();
   if (
     unmatched ||
     items.length === 0 ||
-    items.some((field) => !field || !TICKET_FIELDS.has(field))
+    items.some(({ field }) => !field || !TICKET_FIELDS.has(field))
   ) {
-    return { html, body: cleanTracText(html) };
+    return { html, body: cleanTracText(html, origin) };
   }
 
   const narrativeHtml = html.slice(list[0].length);
-  return { html, body: cleanTracText(narrativeHtml), narrativeHtml };
+  return { html, body: cleanTracText(narrativeHtml, origin), narrativeHtml, fields: items };
+}
+
+// cc churn is noise on every long ticket; everything else Trac records is kept.
+const OMITTED_CHANGE_FIELDS = new Set(['cc']);
+
+function describeTicketChanges(fields: TicketFieldChange[] | undefined, title: string): string {
+  if (fields === undefined) {
+    return filterTicketFieldChurn(title);
+  }
+  return fields
+    .filter(({ field }) => !OMITTED_CHANGE_FIELDS.has(field))
+    .map(({ field, value }) => (value ? `${field}: ${value}` : field))
+    .join('; ');
 }
 
 function filterTicketFieldChurn(changes: string): string {
@@ -572,42 +663,60 @@ function filterTicketFieldChurn(changes: string): string {
       const fields = match[1]
         .split(',')
         .map((field) => field.trim())
-        .filter((field) => !['cc', 'keywords'].includes(field.toLowerCase()));
+        .filter((field) => !OMITTED_CHANGE_FIELDS.has(field.toLowerCase()));
       return fields.length ? `${fields.join(', ')} ${match[2]}` : '';
     })
     .filter(Boolean)
     .join('; ');
 }
 
-function attachmentFilename(html: string): string {
+function attachmentFilename(html: string, origin: string): string {
   const emphasized = html.match(/<em(?:\s[^>]*)?>([\s\S]*?)<\/em>/i)?.[1];
   const fieldValue = html.match(
     /<strong(?:\s[^>]*)?>\s*attachment\s*<\/strong>[\s\S]*?<span\s+class=["']trac-field-new["'][^>]*>([\s\S]*?)<\/span>/i
   )?.[1];
-  return cleanTracText(emphasized ?? fieldValue ?? '');
+  return cleanTracText(emphasized ?? fieldValue ?? '', origin);
 }
 
 type RssItem = ReturnType<typeof parseRssItems>[number];
 type ClassifiedTicketHistory =
   | { kind: 'attachment'; entry: TicketAttachment }
   | { kind: 'changeset'; entry: TicketChangeset }
-  | { kind: 'comment'; entry: TicketHistoryEntry };
+  | { kind: 'comment'; entry: TicketHistoryEntry }
+  | { kind: 'omitted'; entry: OmittedTicketComment };
+
+function ticketCommentId(link: string): number | null {
+  const id = link.match(/#comment:(\d+)/)?.[1];
+  return id ? Number.parseInt(id, 10) : null;
+}
+
+function omittedTicketComment(
+  item: RssItem,
+  reason: OmittedTicketComment['reason']
+): ClassifiedTicketHistory | null {
+  const id = ticketCommentId(item.link);
+  return id === null ? null : { kind: 'omitted', entry: { id, author: item.author, reason } };
+}
 
 function classifyTicketHistoryItem(
   instance: TracInstance,
   ticketId: number,
   item: RssItem
 ): ClassifiedTicketHistory | null {
-  if (
-    ['prbot', 'slackbot'].includes(item.author.toLowerCase()) ||
-    /#description$/.test(item.link)
-  ) {
+  if (['prbot', 'slackbot'].includes(item.author.toLowerCase())) {
+    return omittedTicketComment(item, 'bot');
+  }
+  if (/#description$/.test(item.link)) {
     return null;
   }
 
-  const parsedDescription = splitTicketHistoryDescription(item.rawDescription);
+  const parsedDescription = splitTicketHistoryDescription(
+    item.descriptionHtml,
+    instance.origin,
+    item.title
+  );
   if (item.title.toLowerCase() === 'attachment set') {
-    const filename = attachmentFilename(parsedDescription.html);
+    const filename = attachmentFilename(parsedDescription.html, instance.origin);
     return {
       kind: 'attachment',
       entry: {
@@ -634,22 +743,24 @@ function classifyTicketHistoryItem(
         revision,
         author: item.author,
         timestamp: item.date,
-        changes: filterTicketFieldChurn(item.title),
-        message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length)),
+        changes: describeTicketChanges(parsedDescription.fields, item.title),
+        message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length), instance.origin),
         url: `${instance.origin}/changeset/${revision}`,
       },
     };
   }
 
-  const changes = filterTicketFieldChurn(item.title);
+  const changes = describeTicketChanges(parsedDescription.fields, item.title);
   if (!changes && !parsedDescription.body) {
-    return null;
+    return omittedTicketComment(
+      item,
+      parsedDescription.fields || /\bcc\b/i.test(item.title) ? 'cc' : 'empty'
+    );
   }
-  const commentId = item.link.match(/#comment:(\d+)/)?.[1];
   return {
     kind: 'comment',
     entry: {
-      id: commentId ? Number.parseInt(commentId, 10) : null,
+      id: ticketCommentId(item.link),
       author: item.author,
       timestamp: item.date,
       changes,
@@ -663,8 +774,9 @@ function classifyTicketHistory(instance: TracInstance, ticketId: number, rssText
   const comments: TicketHistoryEntry[] = [];
   const attachments: TicketAttachment[] = [];
   const changesets: TicketChangeset[] = [];
+  const omittedComments: OmittedTicketComment[] = [];
 
-  for (const item of parseRssItems(rssText)) {
+  for (const item of parseRssItems(rssText, instance.origin)) {
     const classified = classifyTicketHistoryItem(instance, ticketId, item);
     if (classified?.kind === 'comment') {
       comments.push(classified.entry);
@@ -672,10 +784,12 @@ function classifyTicketHistory(instance: TracInstance, ticketId: number, rssText
       attachments.push(classified.entry);
     } else if (classified?.kind === 'changeset') {
       changesets.push(classified.entry);
+    } else if (classified?.kind === 'omitted') {
+      omittedComments.push(classified.entry);
     }
   }
 
-  return { comments, attachments, changesets };
+  return { comments, attachments, changesets, omittedComments };
 }
 
 export function parseCsvRecords(csvData: string): TracRecord[] {
@@ -719,8 +833,8 @@ function configuredTracFields(html: string): Set<string> | null {
   );
 }
 
-// Query parameters this server sets for itself; everything else it adds is a filter.
-const QUERY_CONTROL_PARAMS = new Set(['col', 'format', 'max', 'page']);
+// Query parameters that shape the response rather than filter it; the field check skips them.
+const QUERY_CONTROL_PARAMS = new Set(['col', 'desc', 'format', 'max', 'order', 'page']);
 
 /**
  * Ticket fields a query URL filters on.
@@ -740,13 +854,42 @@ function addColumns(url: URL, columns: readonly string[]): void {
   }
 }
 
+// Trac's sortable columns: every ticket column plus the two timestamps.
+const TICKET_ORDER_COLUMNS = new Set<string>([...TICKET_COLUMNS, 'time', 'changetime']);
+// Sort columns that never appear in a query page's filter picker.
+const TICKET_ORDER_COLUMNS_UNFILTERED = new Set(['id', 'time', 'changetime']);
+
 export function parseTicketFilter(expression: string): [string, string] {
-  const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
+  const match = expression.match(/^([a-z][a-z0-9_]*)(!?~?=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
-    throw new ToolError('invalid_argument', `Invalid ticket filter expression: ${expression}`);
+    throw new ToolError(
+      'invalid_argument',
+      `Invalid ticket filter expression: ${expression}. Use field=value, field~=value, field!=value, or field!~=value`
+    );
   }
 
   const field = match[1].toLowerCase();
+  const operator = match[2];
+  const value = match[3];
+  if (field === 'order') {
+    const column = value.toLowerCase();
+    if (operator !== '=' || !TICKET_ORDER_COLUMNS.has(column)) {
+      throw new ToolError(
+        'invalid_argument',
+        `Unsupported sort column: ${value}. Use order=<column> with one of ${Array.from(TICKET_ORDER_COLUMNS).join(', ')}`
+      );
+    }
+    return ['order', column];
+  }
+  if (field === 'desc') {
+    if (operator !== '=' || !/^(?:1|true|0|false)$/i.test(value)) {
+      throw new ToolError(
+        'invalid_argument',
+        `Unsupported desc value: ${value}. Use desc=1 or desc=0`
+      );
+    }
+    return ['desc', /^(?:1|true)$/i.test(value) ? '1' : '0'];
+  }
   if (
     !TICKET_COLUMNS.includes(field as (typeof TICKET_COLUMNS)[number]) &&
     field !== 'description'
@@ -754,7 +897,8 @@ export function parseTicketFilter(expression: string): [string, string] {
     throw new ToolError('invalid_argument', `Unsupported ticket filter: ${field}`);
   }
 
-  return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
+  // Trac's value prefix is the operator without its trailing =.
+  return [field, `${operator.slice(0, -1)}${value}`];
 }
 
 export function addTicketSearchQuery(url: URL, query: string): void {
@@ -774,8 +918,23 @@ export function addTicketSearchQuery(url: URL, query: string): void {
     return;
   }
 
+  // Trac reads one operator per field, from its first value, so mixing them is rejected.
+  const operators = new Map<string, string>();
   for (const expression of trimmedQuery.split('&')) {
     const [field, value] = parseTicketFilter(expression);
+    if (QUERY_CONTROL_PARAMS.has(field)) {
+      url.searchParams.set(field, value);
+      continue;
+    }
+    const operator = value.match(/^(!~|!|~)?/)?.[1] ?? '';
+    const previous = operators.get(field);
+    if (previous !== undefined && previous !== operator) {
+      throw new ToolError(
+        'invalid_argument',
+        `Repeated ${field} filters must use the same operator; Trac applies the first one to every value`
+      );
+    }
+    operators.set(field, operator);
     url.searchParams.append(field, value);
   }
 }
@@ -935,6 +1094,12 @@ export async function searchTracTickets(
         `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
       );
     }
+    const order = queryUrl.searchParams.get('order');
+    if (order && !configured.has(order) && !TICKET_ORDER_COLUMNS_UNFILTERED.has(order)) {
+      throw new Error(
+        `${tracDisplayName(instance)} has no ${order} field to sort by, so Trac would fall back to its default order. Fields available here: ${Array.from(configured).sort().join(', ')}`
+      );
+    }
   }
 
   const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
@@ -996,9 +1161,9 @@ async function fetchTicket(
 
   const rssText = await rssResponse.text();
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
-  const description = cleanTracText(extractXmlElement(channel, 'description'));
+  const description = cleanTracText(readXmlText(channel, 'description'), instance.origin);
   const history = classifyTicketHistory(instance, ticketId, rssText);
-  const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
+  const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), TICKET_COMMENT_LIMIT_MAX);
   const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
 
@@ -1010,6 +1175,7 @@ async function fetchTicket(
     linkedPullRequestsUnavailable: linkedPullRequestsResult.unavailable,
     attachments: history.attachments,
     changesets: history.changesets,
+    omittedComments: history.omittedComments,
   };
 }
 
@@ -1027,6 +1193,7 @@ function formatTicketResult(
     linkedPullRequestsUnavailable,
     attachments,
     changesets,
+    omittedComments,
   } = ticketData;
   const historyText =
     includeComments && comments.length > 0
@@ -1038,6 +1205,12 @@ function formatTicketResult(
             return `${heading}\n${entry.comment}`.trim();
           })
           .join('\n\n')}`
+      : '';
+  const omittedText =
+    includeComments && omittedComments.length > 0
+      ? `\n\nOmitted comments: ${omittedComments
+          .map((entry) => `${entry.id} (${entry.author}, ${entry.reason})`)
+          .join('; ')}`
       : '';
   const linkedPullRequestsText = linkedPullRequestsUnavailable
     ? '\n\nLinked pull requests: unavailable'
@@ -1100,13 +1273,14 @@ Keywords: ${ticket.keywords}
 Focuses: ${ticket.focuses}
 
 Description:
-${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}`,
+${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}${omittedText}`,
     url: `${instance.origin}/ticket/${ticket.id}`,
     metadata: {
       ticket,
       comments,
       totalComments,
       returnedComments: comments.length,
+      omittedComments,
       linkedPullRequests,
       linkedPullRequestsUnavailable,
       attachments,
@@ -1142,17 +1316,21 @@ async function fetchChangeset(
 
   const html = await response.text();
   const message = cleanTracText(
-    html.match(/<dd class="message[^"]*"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? ''
+    html.match(/<dd class="message[^"]*"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '',
+    instance.origin
   );
-  const author = cleanTracText(html.match(/<dd class="author"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '');
+  const author = cleanTracText(
+    html.match(/<dd class="author"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '',
+    instance.origin
+  );
   const date =
-    cleanTracText(html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '')
+    cleanTracText(html.match(/<dd class="time"[^>]*>([\s\S]*?)<\/dd>/i)?.[1] ?? '', instance.origin)
       .split('\n')[0]
       ?.trim() ?? '';
   const filesSection = html.match(/<dd class="files"[^>]*>([\s\S]*?)<\/ul>\s*<\/dd>/i)?.[1] ?? '';
   const files = Array.from(
     filesSection.matchAll(/<a[^>]*href="\/browser\/[^"]*"[^>]*>([\s\S]*?)<\/a>/gi),
-    (match) => cleanTracText(match[1] ?? '')
+    (match) => cleanTracText(match[1] ?? '', instance.origin)
   ).filter(Boolean);
 
   let diff = '';
@@ -1238,7 +1416,7 @@ async function fetchTracFieldOptions(
 
   return {
     data: Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
-      cleanTracText(match[1] ?? '')
+      cleanTracText(match[1] ?? '', instance.origin)
     ).filter(Boolean),
     configured: true,
   };
@@ -1330,11 +1508,11 @@ function timelineEventDay(date: string): string {
   return Number.isNaN(timestamp) ? '' : timelineDay(timestamp);
 }
 
-function parseTimelineItems(rssText: string): RssItem[] {
+function parseTimelineItems(rssText: string, origin: string): RssItem[] {
   if (/<!doctype html|<html/i.test(rssText)) {
     throw new ToolError('upstream_error', 'Trac returned HTML instead of RSS');
   }
-  const items = parseRssItems(rssText);
+  const items = parseRssItems(rssText, origin);
   if (items.some((item) => Number.isNaN(Date.parse(item.date)))) {
     throw new Error('Trac timeline returned an event with a missing or invalid pubDate');
   }
@@ -1504,7 +1682,11 @@ async function fetchTimeline(instance: TracInstance, query: TimelineQuery) {
     throw upstreamHttpError(response, `Failed to fetch timeline: ${response.statusText}`);
   }
 
-  return buildTimelineResult(instance, parseTimelineItems(await response.text()), query);
+  return buildTimelineResult(
+    instance,
+    parseTimelineItems(await response.text(), instance.origin),
+    query
+  );
 }
 
 async function fetchLegacyTimeline(instance: TracInstance, days: number, limit: number) {
@@ -1524,7 +1706,7 @@ async function fetchLegacyTimeline(instance: TracInstance, days: number, limit: 
     throw upstreamHttpError(response, `Failed to fetch timeline: ${response.statusText}`);
   }
 
-  const results = formatTimelineEvents(parseTimelineItems(await response.text()));
+  const results = formatTimelineEvents(parseTimelineItems(await response.text(), instance.origin));
   return {
     results,
     totalEvents: results.length,
@@ -1688,7 +1870,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                   query: {
                     type: 'string',
                     description:
-                      'Optional keywords, ticket number, or filter expressions joined by &: milestone=6.9&status=closed',
+                      'Optional keywords, ticket number, or filter expressions joined by &. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values, using the same operator each time. Add order=<column> and desc=1 to sort, for example component=Editor&status!=closed&order=changetime&desc=1',
                   },
                   limit: {
                     type: 'number',
@@ -1738,9 +1920,12 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                     default: true,
                   },
                   commentLimit: {
-                    type: 'number',
-                    description: 'Maximum number of comments to return (default: 10, max: 50)',
+                    type: 'integer',
+                    description:
+                      'Maximum number of comments to return, newest first from the end of the discussion (default: 10, max: 500). Compare returnedComments with totalComments to see whether older comments were left out.',
                     default: 10,
+                    minimum: 0,
+                    maximum: 500,
                   },
                 },
                 required: ['id'],
