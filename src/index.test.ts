@@ -299,6 +299,34 @@ describe('MCP transport', () => {
     expect(result.error).toContain('Forbidden');
   });
 
+  it('accepts a commentLimit of 500 and rejects 501', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('Not Found', { status: 404 }))
+    );
+
+    const accepted = (await (
+      await mcpRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 500 } },
+      })
+    ).json()) as RpcBody;
+    const rejected = (await (
+      await mcpRequest({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 501 } },
+      })
+    ).json()) as RpcBody;
+
+    expect(accepted.error).toBeUndefined();
+    expect(accepted.result.isError).toBe(true);
+    expect(rejected.error.code).toBe(-32602);
+  });
+
   it('requests timeline activity ending today across ticket and repository events', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-05T12:00:00Z'));

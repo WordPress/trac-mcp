@@ -22,10 +22,12 @@ const SearchTicketsArgsSchema = z.object({
   milestone: z.string().max(100).optional(),
   resolution: z.string().max(100).optional(),
 });
+// The whole ticket RSS is fetched before slicing, so the cap only bounds response size.
+const TICKET_COMMENT_LIMIT_MAX = 500;
 const GetTicketArgsSchema = z.object({
   id: z.number().int().positive(),
   includeComments: z.boolean().default(true),
-  commentLimit: z.number().int().min(0).max(50).default(10),
+  commentLimit: z.number().int().min(0).max(TICKET_COMMENT_LIMIT_MAX).default(10),
 });
 const GetChangesetArgsSchema = z.object({
   revision: z.number().int().positive(),
@@ -903,7 +905,7 @@ async function fetchTicket(
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
   const description = cleanTracText(extractXmlElement(channel, 'description'));
   const history = classifyTicketHistory(instance, ticketId, rssText);
-  const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
+  const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), TICKET_COMMENT_LIMIT_MAX);
   const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
 
@@ -1425,9 +1427,12 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                     default: true,
                   },
                   commentLimit: {
-                    type: 'number',
-                    description: 'Maximum number of comments to return (default: 10, max: 50)',
+                    type: 'integer',
+                    description:
+                      'Maximum number of comments to return, newest first from the end of the discussion (default: 10, max: 500). Compare returnedComments with totalComments to see whether older comments were left out.',
                     default: 10,
+                    minimum: 0,
+                    maximum: 500,
                   },
                 },
                 required: ['id'],
