@@ -415,7 +415,8 @@ function rewriteAnchor(tag: string, origin: string): string {
   }
 
   try {
-    return `<a href="${new URL(target, origin).href}">`;
+    const url = new URL(target, origin);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? `<a href="${url.href}">` : '';
   } catch {
     return '';
   }

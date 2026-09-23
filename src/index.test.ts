@@ -136,6 +136,12 @@ describe('Trac parsing', () => {
     );
   });
 
+  it('unwraps an anchor whose href is not an http or https URL', () => {
+    expect(cleanTracText('<p><a href="javascript:alert(1)">run</a> it</p>', CORE_TRAC.origin)).toBe(
+      'run it'
+    );
+  });
+
   it('drops an anchor that carries no href', () => {
     expect(cleanTracText('<p><a name="top"></a>Top</p>', CORE_TRAC.origin)).toBe('Top');
   });
