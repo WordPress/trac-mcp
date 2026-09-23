@@ -624,7 +624,7 @@ function configuredTracFields(html: string): Set<string> | null {
   );
 }
 
-// Query parameters this server sets for itself; everything else it adds is a filter.
+// Query parameters that shape the response rather than filter it; the field check skips them.
 const QUERY_CONTROL_PARAMS = new Set(['col', 'desc', 'format', 'max', 'order', 'page']);
 
 /**
@@ -647,16 +647,11 @@ function addColumns(url: URL, columns: readonly string[]): void {
 
 // Trac's sortable columns: every ticket column plus the two timestamps.
 const TICKET_ORDER_COLUMNS = new Set<string>([...TICKET_COLUMNS, 'time', 'changetime']);
-// Operator spellings accepted in a filter expression, mapped to Trac's value prefixes.
-const TICKET_FILTER_OPERATORS: Record<string, string> = {
-  '=': '',
-  '~=': '~',
-  '!=': '!',
-  '!~=': '!~',
-};
+// Sort columns that never appear in a query page's filter picker.
+const TICKET_ORDER_COLUMNS_UNFILTERED = new Set(['id', 'time', 'changetime']);
 
 export function parseTicketFilter(expression: string): [string, string] {
-  const match = expression.match(/^([a-z][a-z0-9_]*)(!~=|~=|!=|=)(.+)$/i);
+  const match = expression.match(/^([a-z][a-z0-9_]*)(!?~?=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
     throw new ToolError(
       'invalid_argument',
@@ -668,17 +663,21 @@ export function parseTicketFilter(expression: string): [string, string] {
   const operator = match[2];
   const value = match[3];
   if (field === 'order') {
-    if (operator !== '=' || !TICKET_ORDER_COLUMNS.has(value.toLowerCase())) {
+    const column = value.toLowerCase();
+    if (operator !== '=' || !TICKET_ORDER_COLUMNS.has(column)) {
       throw new ToolError(
         'invalid_argument',
         `Unsupported sort column: ${value}. Use order=<column> with one of ${Array.from(TICKET_ORDER_COLUMNS).join(', ')}`
       );
     }
-    return ['order', value.toLowerCase()];
+    return ['order', column];
   }
   if (field === 'desc') {
     if (operator !== '=' || !/^(?:1|true|0|false)$/i.test(value)) {
-      throw new ToolError('invalid_argument', `Unsupported desc value: ${value}. Use desc=1`);
+      throw new ToolError(
+        'invalid_argument',
+        `Unsupported desc value: ${value}. Use desc=1 or desc=0`
+      );
     }
     return ['desc', /^(?:1|true)$/i.test(value) ? '1' : '0'];
   }
@@ -689,7 +688,8 @@ export function parseTicketFilter(expression: string): [string, string] {
     throw new ToolError('invalid_argument', `Unsupported ticket filter: ${field}`);
   }
 
-  return [field, `${TICKET_FILTER_OPERATORS[operator] ?? ''}${value}`];
+  // Trac's value prefix is the operator without its trailing =.
+  return [field, `${operator.slice(0, -1)}${value}`];
 }
 
 export function addTicketSearchQuery(url: URL, query: string): void {
@@ -709,13 +709,24 @@ export function addTicketSearchQuery(url: URL, query: string): void {
     return;
   }
 
+  // Trac reads one operator per field, from its first value, so mixing them is rejected.
+  const operators = new Map<string, string>();
   for (const expression of trimmedQuery.split('&')) {
     const [field, value] = parseTicketFilter(expression);
     if (QUERY_CONTROL_PARAMS.has(field)) {
       url.searchParams.set(field, value);
-    } else {
-      url.searchParams.append(field, value);
+      continue;
     }
+    const operator = value.match(/^(!~|!|~)?/)?.[1] ?? '';
+    const previous = operators.get(field);
+    if (previous !== undefined && previous !== operator) {
+      throw new ToolError(
+        'invalid_argument',
+        `Repeated ${field} filters must use the same operator; Trac applies the first one to every value`
+      );
+    }
+    operators.set(field, operator);
+    url.searchParams.append(field, value);
   }
 }
 
@@ -872,6 +883,12 @@ export async function searchTracTickets(
     if (unsupported.length) {
       throw new Error(
         `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
+      );
+    }
+    const order = queryUrl.searchParams.get('order');
+    if (order && !configured.has(order) && !TICKET_ORDER_COLUMNS_UNFILTERED.has(order)) {
+      throw new Error(
+        `${tracDisplayName(instance)} has no ${order} field to sort by, so Trac would fall back to its default order. Fields available here: ${Array.from(configured).sort().join(', ')}`
       );
     }
   }
@@ -1409,7 +1426,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                   query: {
                     type: 'string',
                     description:
-                      'Plain keywords (summary-only substring match), a ticket number such as 12345 or #12345, or filter expressions joined by &. Fields: summary, description, owner, reporter, type, status, priority, milestone, component, version, severity, resolution, keywords, cc, focuses. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values: status=new&status=assigned. Sort with order=<column> (any field above, plus time and changetime) and desc=1. Example: owner=audrasjb&keywords~=has-patch&status!=closed&order=changetime&desc=1. An expression on a field this instance does not configure is rejected rather than silently ignored.',
+                      'Plain keywords (summary-only substring match), a ticket number such as 12345 or #12345, or filter expressions joined by &. Fields: summary, description, owner, reporter, type, status, priority, milestone, component, version, severity, resolution, keywords, cc, focuses. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values, using the same operator each time: status=new&status=assigned. Sort with order=<column> (any field above, plus time and changetime) and desc=1. Example: owner=audrasjb&keywords~=has-patch&status!=closed&order=changetime&desc=1. An expression on a field this instance does not configure is rejected rather than silently ignored.',
                   },
                   limit: {
                     type: 'number',

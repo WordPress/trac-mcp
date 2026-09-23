@@ -96,7 +96,7 @@ Plain keywords match the ticket summary only; use `description~=text` to search 
 Expressions can name `summary`, `description`, `owner`, `reporter`, `type`, `status`, `priority`,
 `milestone`, `component`, `version`, `severity`, `resolution`, `keywords`, `cc`, or `focuses`, and
 take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not contain. Repeat
-a field to OR its values (`status=new&status=assigned`). Add `order=<column>` and `desc=1` to
+a field to OR its values (`status=new&status=assigned`), with the same operator each time. Add `order=<column>` and `desc=1` to
 sort, for example `component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are
 the fields above plus `time` and `changetime`. Field values differ by instance: `getTracInfo`
 lists the components, milestones, priorities, severities, types, and statuses each one configures.
