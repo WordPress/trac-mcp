@@ -60,7 +60,7 @@ The standard `/mcp` endpoint provides:
 | Tool | Purpose |
 | --- | --- |
 | `searchTickets` | Search by keywords, ticket number, or structured filters |
-| `getTicket` | Read a ticket, its attachments, changesets, recent human discussion, and linked pull requests |
+| `getTicket` | Read a ticket, its attachments, changesets, human discussion, and linked pull requests. `commentLimit` returns the newest comments, up to 500, and the result reports `totalComments` and `returnedComments` |
 | `getChangeset` | Read a changeset and an optional truncated diff |
 | `getTimeline` | Read recent Trac activity |
 | `getTracInfo` | List components, milestones, priorities, severities, types, or statuses |
@@ -101,6 +101,12 @@ point without one. Relative Trac links resolve against the instance you connecte
   "page": 2
 }
 ```
+
+Expressions take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not
+contain. Repeat a field to OR its values, with the same operator each time. Add `order=<column>`
+and `desc=1` to sort, for example
+`component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are the ticket
+columns plus `time` and `changetime`.
 
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
 separate argument overrides the same field in `query`. Results include pagination metadata.

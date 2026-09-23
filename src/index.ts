@@ -4,7 +4,7 @@ import { z } from 'zod';
 const JsonRpcRequestSchema = z.object({
   jsonrpc: z.literal('2.0'),
   method: z.string(),
-  params: z.record(z.unknown()).optional(),
+  params: z.record(z.string(), z.unknown()).optional(),
   id: z.union([z.string(), z.number()]).optional(),
 });
 type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
@@ -22,10 +22,12 @@ const SearchTicketsArgsSchema = z.object({
   milestone: z.string().max(100).optional(),
   resolution: z.string().max(100).optional(),
 });
+// The whole ticket RSS is fetched before slicing, so the cap only bounds response size.
+const TICKET_COMMENT_LIMIT_MAX = 500;
 const GetTicketArgsSchema = z.object({
   id: z.number().int().positive(),
   includeComments: z.boolean().default(true),
-  commentLimit: z.number().int().min(0).max(50).default(10),
+  commentLimit: z.number().int().min(0).max(TICKET_COMMENT_LIMIT_MAX).default(10),
 });
 const GetChangesetArgsSchema = z.object({
   revision: z.number().int().positive(),
@@ -69,8 +71,8 @@ const LinkedPullRequestSchema = z.object({
     html_url: z.string().url(),
   }),
   touches_tests: z.boolean(),
-  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string())),
-  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.array(z.string()))),
+  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string(), z.string())),
+  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.string(), z.array(z.string()))),
   mergeable_state: z.string(),
   body: z.string().nullable(),
   html_url: z.string().url(),
@@ -736,8 +738,8 @@ function configuredTracFields(html: string): Set<string> | null {
   );
 }
 
-// Query parameters this server sets for itself; everything else it adds is a filter.
-const QUERY_CONTROL_PARAMS = new Set(['col', 'format', 'max', 'page']);
+// Query parameters that shape the response rather than filter it; the field check skips them.
+const QUERY_CONTROL_PARAMS = new Set(['col', 'desc', 'format', 'max', 'order', 'page']);
 
 /**
  * Ticket fields a query URL filters on.
@@ -757,13 +759,42 @@ function addColumns(url: URL, columns: readonly string[]): void {
   }
 }
 
+// Trac's sortable columns: every ticket column plus the two timestamps.
+const TICKET_ORDER_COLUMNS = new Set<string>([...TICKET_COLUMNS, 'time', 'changetime']);
+// Sort columns that never appear in a query page's filter picker.
+const TICKET_ORDER_COLUMNS_UNFILTERED = new Set(['id', 'time', 'changetime']);
+
 export function parseTicketFilter(expression: string): [string, string] {
-  const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
+  const match = expression.match(/^([a-z][a-z0-9_]*)(!?~?=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
-    throw new ToolError('invalid_argument', `Invalid ticket filter expression: ${expression}`);
+    throw new ToolError(
+      'invalid_argument',
+      `Invalid ticket filter expression: ${expression}. Use field=value, field~=value, field!=value, or field!~=value`
+    );
   }
 
   const field = match[1].toLowerCase();
+  const operator = match[2];
+  const value = match[3];
+  if (field === 'order') {
+    const column = value.toLowerCase();
+    if (operator !== '=' || !TICKET_ORDER_COLUMNS.has(column)) {
+      throw new ToolError(
+        'invalid_argument',
+        `Unsupported sort column: ${value}. Use order=<column> with one of ${Array.from(TICKET_ORDER_COLUMNS).join(', ')}`
+      );
+    }
+    return ['order', column];
+  }
+  if (field === 'desc') {
+    if (operator !== '=' || !/^(?:1|true|0|false)$/i.test(value)) {
+      throw new ToolError(
+        'invalid_argument',
+        `Unsupported desc value: ${value}. Use desc=1 or desc=0`
+      );
+    }
+    return ['desc', /^(?:1|true)$/i.test(value) ? '1' : '0'];
+  }
   if (
     !TICKET_COLUMNS.includes(field as (typeof TICKET_COLUMNS)[number]) &&
     field !== 'description'
@@ -771,7 +802,8 @@ export function parseTicketFilter(expression: string): [string, string] {
     throw new ToolError('invalid_argument', `Unsupported ticket filter: ${field}`);
   }
 
-  return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
+  // Trac's value prefix is the operator without its trailing =.
+  return [field, `${operator.slice(0, -1)}${value}`];
 }
 
 export function addTicketSearchQuery(url: URL, query: string): void {
@@ -791,8 +823,23 @@ export function addTicketSearchQuery(url: URL, query: string): void {
     return;
   }
 
+  // Trac reads one operator per field, from its first value, so mixing them is rejected.
+  const operators = new Map<string, string>();
   for (const expression of trimmedQuery.split('&')) {
     const [field, value] = parseTicketFilter(expression);
+    if (QUERY_CONTROL_PARAMS.has(field)) {
+      url.searchParams.set(field, value);
+      continue;
+    }
+    const operator = value.match(/^(!~|!|~)?/)?.[1] ?? '';
+    const previous = operators.get(field);
+    if (previous !== undefined && previous !== operator) {
+      throw new ToolError(
+        'invalid_argument',
+        `Repeated ${field} filters must use the same operator; Trac applies the first one to every value`
+      );
+    }
+    operators.set(field, operator);
     url.searchParams.append(field, value);
   }
 }
@@ -952,6 +999,12 @@ export async function searchTracTickets(
         `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
       );
     }
+    const order = queryUrl.searchParams.get('order');
+    if (order && !configured.has(order) && !TICKET_ORDER_COLUMNS_UNFILTERED.has(order)) {
+      throw new Error(
+        `${tracDisplayName(instance)} has no ${order} field to sort by, so Trac would fall back to its default order. Fields available here: ${Array.from(configured).sort().join(', ')}`
+      );
+    }
   }
 
   const totalMatch = totalHtml.match(/<span class="numrows">\s*\(([\d,]+)\s+match(?:es)?\)/i);
@@ -1015,7 +1068,7 @@ async function fetchTicket(
   const channel = rssText.split(/<item>/i, 1)[0] ?? '';
   const description = cleanTracText(readXmlText(channel, 'description'), instance.origin);
   const history = classifyTicketHistory(instance, ticketId, rssText);
-  const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), 50);
+  const limit = Math.min(Math.max(Math.trunc(commentLimit), 0), TICKET_COMMENT_LIMIT_MAX);
   const comments = includeComments && limit > 0 ? history.comments.slice(-limit) : [];
   const ticket = { ...ticketFromRecord(record), description };
 
@@ -1500,7 +1553,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                   query: {
                     type: 'string',
                     description:
-                      'Optional keywords, ticket number, or filter expressions joined by &: milestone=6.9&status=closed',
+                      'Optional keywords, ticket number, or filter expressions joined by &. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values, using the same operator each time. Add order=<column> and desc=1 to sort, for example component=Editor&status!=closed&order=changetime&desc=1',
                   },
                   limit: {
                     type: 'number',
@@ -1550,9 +1603,12 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                     default: true,
                   },
                   commentLimit: {
-                    type: 'number',
-                    description: 'Maximum number of comments to return (default: 10, max: 50)',
+                    type: 'integer',
+                    description:
+                      'Maximum number of comments to return, newest first from the end of the discussion (default: 10, max: 500). Compare returnedComments with totalComments to see whether older comments were left out.',
                     default: 10,
+                    minimum: 0,
+                    maximum: 500,
                   },
                 },
                 required: ['id'],

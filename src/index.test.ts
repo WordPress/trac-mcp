@@ -160,6 +160,48 @@ describe('Trac parsing', () => {
     expect(url.searchParams.get('status')).toBe('closed');
     expect(() => parseTicketFilter('bogusfield~=value')).toThrow('Unsupported ticket filter');
   });
+
+  it('maps negation operators onto the value prefixes Trac reads', () => {
+    expect(parseTicketFilter('status!=closed')).toEqual(['status', '!closed']);
+    expect(parseTicketFilter('keywords!~=needs-patch')).toEqual(['keywords', '!~needs-patch']);
+    expect(() => parseTicketFilter('status<>closed')).toThrow('field!=value');
+  });
+
+  it('passes native Trac spellings and values containing = through unchanged', () => {
+    expect(parseTicketFilter('status=!closed')).toEqual(['status', '!closed']);
+    expect(parseTicketFilter('summary=~composer')).toEqual(['summary', '~composer']);
+    expect(parseTicketFilter('description~=key=value')).toEqual(['description', '~key=value']);
+    expect(parseTicketFilter('summary!=a=b')).toEqual(['summary', '!a=b']);
+  });
+
+  it('accepts order and desc as sort controls', () => {
+    const url = new URL('https://core.trac.wordpress.org/query');
+    addTicketSearchQuery(url, 'component=Editor&order=changetime&desc=1&order=priority');
+
+    expect(url.searchParams.getAll('component')).toEqual(['Editor']);
+    expect(url.searchParams.getAll('order')).toEqual(['priority']);
+    expect(url.searchParams.get('desc')).toBe('1');
+    expect(() => parseTicketFilter('order=bogus')).toThrow('Unsupported sort column');
+    expect(() => parseTicketFilter('order~=changetime')).toThrow('Unsupported sort column');
+    expect(() => parseTicketFilter('desc=yes')).toThrow('Unsupported desc value');
+  });
+
+  it('rejects repeated filters on one field with different operators', () => {
+    const url = new URL('https://core.trac.wordpress.org/query');
+    addTicketSearchQuery(
+      url,
+      'status=new&status=assigned&keywords=!has-patch&keywords!=needs-patch'
+    );
+    expect(url.searchParams.getAll('status')).toEqual(['new', 'assigned']);
+    expect(url.searchParams.getAll('keywords')).toEqual(['!has-patch', '!needs-patch']);
+
+    expect(() =>
+      addTicketSearchQuery(
+        new URL('https://core.trac.wordpress.org/query'),
+        'status!=closed&status=new'
+      )
+    ).toThrow('same operator');
+  });
 });
 
 describe('ticket search pagination', () => {
@@ -342,6 +384,34 @@ describe('MCP transport', () => {
     expect(body.result.isError).toBe(true);
     expect(result.code).toBe('upstream_error');
     expect(result.error).toContain('Forbidden');
+  });
+
+  it('accepts a commentLimit of 500 and rejects 501', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('Not Found', { status: 404 }))
+    );
+
+    const accepted = (await (
+      await mcpRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 500 } },
+      })
+    ).json()) as RpcBody;
+    const rejected = (await (
+      await mcpRequest({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 501 } },
+      })
+    ).json()) as RpcBody;
+
+    expect(accepted.error).toBeUndefined();
+    expect(accepted.result.isError).toBe(true);
+    expect(rejected.error.code).toBe(-32602);
   });
 
   it('requests timeline activity ending today across ticket and repository events', async () => {
@@ -1262,6 +1332,66 @@ describe('Trac instance routing', () => {
     const text = body.result.content.at(0)?.text ?? '';
     expect(text).toContain('has no component field');
     expect(text).toContain('keywords, status');
+  });
+
+  it('does not treat sort controls as filter fields the instance must configure', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<html><select name="add_filter_0"><option value="status">Status</option></select><span class="numrows">(1 match)</span></html>'
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'searchTickets',
+          arguments: { query: 'status!=closed&order=changetime&desc=1' },
+        },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    const requested = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(requested.searchParams.get('status')).toBe('!closed');
+    expect(requested.searchParams.get('order')).toBe('changetime');
+    expect(requested.searchParams.get('desc')).toBe('1');
+  });
+
+  it('refuses a sort on a column the routed instance does not configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="status">Status</option></select><span class="numrows">(1 match)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { query: 'order=severity' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text ?? '').toContain('has no severity field to sort by');
   });
 
   it('refuses a filter expression naming a field only other instances configure', async () => {
