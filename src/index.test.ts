@@ -482,6 +482,8 @@ describe('MCP transport', () => {
       <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:02:00 GMT</pubDate><title>description changed</title><link>https://core.trac.wordpress.org/ticket/65793#description</link><description>&lt;p&gt;Ticket description repeated.&lt;/p&gt;</description></item>
       <item><dc:creator>slackbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:03:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:7</link><description>&lt;p&gt;Slack mention.&lt;/p&gt;</description></item>
       <item><dc:creator>prbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:04:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:8</link><description>&lt;p&gt;Pull request relay.&lt;/p&gt;</description></item>
+      <item><dc:creator>watcher</dc:creator><pubDate>Wed, 05 Aug 2026 19:05:00 GMT</pubDate><title>cc set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:9</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;cc&lt;/strong&gt; watcher added&lt;/li&gt;&lt;/ul&gt;</description></item>
+      <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:06:00 GMT</pubDate><title>description changed</title><link>https://core.trac.wordpress.org/ticket/65793#comment:10</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;description&lt;/strong&gt; modified (&lt;a href=&quot;/ticket/65793?action=diff&amp;amp;version=2&quot;&gt;diff&lt;/a&gt;)&lt;/li&gt;&lt;/ul&gt;</description></item>
     </channel></rss>`;
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -495,7 +497,7 @@ describe('MCP transport', () => {
       method: 'tools/call',
       params: {
         name: 'getTicket',
-        arguments: { id: 65793, includeComments: true, commentLimit: 1 },
+        arguments: { id: 65793, includeComments: true, commentLimit: 2 },
       },
     });
     const body = (await response.json()) as RpcBody;
@@ -510,17 +512,38 @@ describe('MCP transport', () => {
     expect(result.metadata.changesets).toEqual([
       expect.objectContaining({
         revision: 59369,
+        changes: 'status: closed; resolution: fixed',
         message: 'Backport message.',
         url: 'https://core.trac.wordpress.org/changeset/59369',
       }),
     ]);
     expect(result.metadata.comments).toEqual([
-      expect.objectContaining({ id: 5, author: 'reviewer', comment: 'Useful review comment.' }),
+      expect.objectContaining({
+        id: 6,
+        author: 'reviewer',
+        changes: 'keywords: needs-testing added',
+        comment: '',
+      }),
+      expect.objectContaining({
+        id: 10,
+        author: 'reporter',
+        changes:
+          'description: modified (<a href="https://core.trac.wordpress.org/ticket/65793?action=diff&version=2">diff</a>)',
+        comment: '',
+      }),
     ]);
-    expect(result.metadata.totalComments).toBe(1);
+    expect(result.metadata.totalComments).toBe(3);
+    expect(result.metadata.omittedComments).toEqual([
+      { id: 7, author: 'slackbot', reason: 'bot' },
+      { id: 8, author: 'prbot', reason: 'bot' },
+      { id: 9, author: 'watcher', reason: 'cc' },
+    ]);
     expect(result.text).toContain('Attachments:');
     expect(result.text).toContain('Changesets:');
     expect(result.text).toContain('Recent comments:');
+    expect(result.text).toContain(
+      'Omitted comments: 7 (slackbot, bot); 8 (prbot, bot); 9 (watcher, cc)'
+    );
     expect(result.text).not.toContain('Slack mention.');
     expect(result.text).not.toContain('Pull request relay.');
     expect(result.text).not.toContain('Ticket description repeated.');

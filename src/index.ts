@@ -310,6 +310,13 @@ type TicketHistoryEntry = {
   url: string;
 };
 
+// A numbered history entry left out of comments, so a gap in the IDs is explained.
+type OmittedTicketComment = {
+  id: number;
+  author: string;
+  reason: 'bot' | 'cc' | 'empty';
+};
+
 type LinkedPullRequest = {
   number: number;
   repository: string;
@@ -504,29 +511,46 @@ const TICKET_FIELDS = new Set([
   'version',
 ]);
 
+type TicketFieldChange = { field: string; value: string };
+
 function splitTicketHistoryDescription(html: string, origin: string) {
   const list = html.match(/^\s*<ul(?:\s[^>]*)?>([\s\S]*?)<\/ul>\s*/i);
   if (!list?.[0] || !list[1]) {
     return { html, body: cleanTracText(html, origin) };
   }
 
-  const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi), (match) =>
-    match[0]
-      .match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>/i)?.[1]
-      ?.trim()
-      .toLowerCase()
-  );
+  const items = Array.from(list[1].matchAll(/<li(?:\s[^>]*)?>([\s\S]*?)<\/li>/gi), (match) => {
+    const item = match[1] ?? '';
+    const label = item.match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>/i);
+    return {
+      field: label?.[1]?.trim().toLowerCase() ?? '',
+      value: cleanTracText(item.slice((label?.index ?? 0) + (label?.[0].length ?? 0)), origin),
+    };
+  });
   const unmatched = list[1].replace(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi, '').trim();
   if (
     unmatched ||
     items.length === 0 ||
-    items.some((field) => !field || !TICKET_FIELDS.has(field))
+    items.some(({ field }) => !field || !TICKET_FIELDS.has(field))
   ) {
     return { html, body: cleanTracText(html, origin) };
   }
 
   const narrativeHtml = html.slice(list[0].length);
-  return { html, body: cleanTracText(narrativeHtml, origin), narrativeHtml };
+  return { html, body: cleanTracText(narrativeHtml, origin), narrativeHtml, fields: items };
+}
+
+// cc churn is noise on every long ticket; everything else Trac records is kept.
+const OMITTED_CHANGE_FIELDS = new Set(['cc']);
+
+function describeTicketChanges(fields: TicketFieldChange[] | undefined, title: string): string {
+  if (fields === undefined) {
+    return filterTicketFieldChurn(title);
+  }
+  return fields
+    .filter(({ field }) => !OMITTED_CHANGE_FIELDS.has(field))
+    .map(({ field, value }) => (value ? `${field}: ${value}` : field))
+    .join('; ');
 }
 
 function filterTicketFieldChurn(changes: string): string {
@@ -540,7 +564,7 @@ function filterTicketFieldChurn(changes: string): string {
       const fields = match[1]
         .split(',')
         .map((field) => field.trim())
-        .filter((field) => !['cc', 'keywords'].includes(field.toLowerCase()));
+        .filter((field) => !OMITTED_CHANGE_FIELDS.has(field.toLowerCase()));
       return fields.length ? `${fields.join(', ')} ${match[2]}` : '';
     })
     .filter(Boolean)
@@ -559,17 +583,31 @@ type RssItem = ReturnType<typeof parseRssItems>[number];
 type ClassifiedTicketHistory =
   | { kind: 'attachment'; entry: TicketAttachment }
   | { kind: 'changeset'; entry: TicketChangeset }
-  | { kind: 'comment'; entry: TicketHistoryEntry };
+  | { kind: 'comment'; entry: TicketHistoryEntry }
+  | { kind: 'omitted'; entry: OmittedTicketComment };
+
+function ticketCommentId(link: string): number | null {
+  const id = link.match(/#comment:(\d+)/)?.[1];
+  return id ? Number.parseInt(id, 10) : null;
+}
+
+function omittedTicketComment(
+  item: RssItem,
+  reason: OmittedTicketComment['reason']
+): ClassifiedTicketHistory | null {
+  const id = ticketCommentId(item.link);
+  return id === null ? null : { kind: 'omitted', entry: { id, author: item.author, reason } };
+}
 
 function classifyTicketHistoryItem(
   instance: TracInstance,
   ticketId: number,
   item: RssItem
 ): ClassifiedTicketHistory | null {
-  if (
-    ['prbot', 'slackbot'].includes(item.author.toLowerCase()) ||
-    /#description$/.test(item.link)
-  ) {
+  if (['prbot', 'slackbot'].includes(item.author.toLowerCase())) {
+    return omittedTicketComment(item, 'bot');
+  }
+  if (/#description$/.test(item.link)) {
     return null;
   }
 
@@ -602,22 +640,21 @@ function classifyTicketHistoryItem(
         revision,
         author: item.author,
         timestamp: item.date,
-        changes: filterTicketFieldChurn(item.title),
+        changes: describeTicketChanges(parsedDescription.fields, item.title),
         message: cleanTracText(narrativeHtml.slice(changesetMatch[0].length), instance.origin),
         url: `${instance.origin}/changeset/${revision}`,
       },
     };
   }
 
-  const changes = filterTicketFieldChurn(item.title);
+  const changes = describeTicketChanges(parsedDescription.fields, item.title);
   if (!changes && !parsedDescription.body) {
-    return null;
+    return omittedTicketComment(item, parsedDescription.fields?.length ? 'cc' : 'empty');
   }
-  const commentId = item.link.match(/#comment:(\d+)/)?.[1];
   return {
     kind: 'comment',
     entry: {
-      id: commentId ? Number.parseInt(commentId, 10) : null,
+      id: ticketCommentId(item.link),
       author: item.author,
       timestamp: item.date,
       changes,
@@ -631,6 +668,7 @@ function classifyTicketHistory(instance: TracInstance, ticketId: number, rssText
   const comments: TicketHistoryEntry[] = [];
   const attachments: TicketAttachment[] = [];
   const changesets: TicketChangeset[] = [];
+  const omittedComments: OmittedTicketComment[] = [];
 
   for (const item of parseRssItems(rssText, instance.origin)) {
     const classified = classifyTicketHistoryItem(instance, ticketId, item);
@@ -640,10 +678,12 @@ function classifyTicketHistory(instance: TracInstance, ticketId: number, rssText
       attachments.push(classified.entry);
     } else if (classified?.kind === 'changeset') {
       changesets.push(classified.entry);
+    } else if (classified?.kind === 'omitted') {
+      omittedComments.push(classified.entry);
     }
   }
 
-  return { comments, attachments, changesets };
+  return { comments, attachments, changesets, omittedComments };
 }
 
 export function parseCsvRecords(csvData: string): TracRecord[] {
@@ -978,6 +1018,7 @@ async function fetchTicket(
     linkedPullRequestsUnavailable: linkedPullRequestsResult.unavailable,
     attachments: history.attachments,
     changesets: history.changesets,
+    omittedComments: history.omittedComments,
   };
 }
 
@@ -995,6 +1036,7 @@ function formatTicketResult(
     linkedPullRequestsUnavailable,
     attachments,
     changesets,
+    omittedComments,
   } = ticketData;
   const historyText =
     includeComments && comments.length > 0
@@ -1006,6 +1048,12 @@ function formatTicketResult(
             return `${heading}\n${entry.comment}`.trim();
           })
           .join('\n\n')}`
+      : '';
+  const omittedText =
+    includeComments && omittedComments.length > 0
+      ? `\n\nOmitted comments: ${omittedComments
+          .map((entry) => `${entry.id} (${entry.author}, ${entry.reason})`)
+          .join('; ')}`
       : '';
   const linkedPullRequestsText = linkedPullRequestsUnavailable
     ? '\n\nLinked pull requests: unavailable'
@@ -1068,13 +1116,14 @@ Keywords: ${ticket.keywords}
 Focuses: ${ticket.focuses}
 
 Description:
-${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}`,
+${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}${omittedText}`,
     url: `${instance.origin}/ticket/${ticket.id}`,
     metadata: {
       ticket,
       comments,
       totalComments,
       returnedComments: comments.length,
+      omittedComments,
       linkedPullRequests,
       linkedPullRequestsUnavailable,
       attachments,
