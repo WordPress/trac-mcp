@@ -115,6 +115,24 @@ describe('Trac parsing', () => {
     expect(url.searchParams.get('status')).toBe('closed');
     expect(() => parseTicketFilter('bogusfield~=value')).toThrow('Unsupported ticket filter');
   });
+
+  it('maps negation operators onto the value prefixes Trac reads', () => {
+    expect(parseTicketFilter('status!=closed')).toEqual(['status', '!closed']);
+    expect(parseTicketFilter('keywords!~=needs-patch')).toEqual(['keywords', '!~needs-patch']);
+    expect(() => parseTicketFilter('status<>closed')).toThrow('field!=value');
+  });
+
+  it('accepts order and desc as sort controls', () => {
+    const url = new URL('https://core.trac.wordpress.org/query');
+    addTicketSearchQuery(url, 'component=Editor&order=changetime&desc=1&order=priority');
+
+    expect(url.searchParams.getAll('component')).toEqual(['Editor']);
+    expect(url.searchParams.getAll('order')).toEqual(['priority']);
+    expect(url.searchParams.get('desc')).toBe('1');
+    expect(() => parseTicketFilter('order=bogus')).toThrow('Unsupported sort column');
+    expect(() => parseTicketFilter('order~=changetime')).toThrow('Unsupported sort column');
+    expect(() => parseTicketFilter('desc=yes')).toThrow('Unsupported desc value');
+  });
 });
 
 describe('ticket search pagination', () => {
@@ -1050,6 +1068,38 @@ describe('Trac instance routing', () => {
     const text = body.result.content.at(0)?.text ?? '';
     expect(text).toContain('has no component field');
     expect(text).toContain('keywords, status');
+  });
+
+  it('does not treat sort controls as filter fields the instance must configure', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+      .mockResolvedValueOnce(
+        new Response(
+          '<html><select name="add_filter_0"><option value="status">Status</option></select><span class="numrows">(1 match)</span></html>'
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'searchTickets',
+          arguments: { query: 'status!=closed&order=changetime&desc=1' },
+        },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    const requested = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(requested.searchParams.get('status')).toBe('!closed');
+    expect(requested.searchParams.get('order')).toBe('changetime');
+    expect(requested.searchParams.get('desc')).toBe('1');
   });
 
   it('refuses a filter expression naming a field only other instances configure', async () => {

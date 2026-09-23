@@ -625,7 +625,7 @@ function configuredTracFields(html: string): Set<string> | null {
 }
 
 // Query parameters this server sets for itself; everything else it adds is a filter.
-const QUERY_CONTROL_PARAMS = new Set(['col', 'format', 'max', 'page']);
+const QUERY_CONTROL_PARAMS = new Set(['col', 'desc', 'format', 'max', 'order', 'page']);
 
 /**
  * Ticket fields a query URL filters on.
@@ -645,13 +645,43 @@ function addColumns(url: URL, columns: readonly string[]): void {
   }
 }
 
+// Trac's sortable columns: every ticket column plus the two timestamps.
+const TICKET_ORDER_COLUMNS = new Set<string>([...TICKET_COLUMNS, 'time', 'changetime']);
+// Operator spellings accepted in a filter expression, mapped to Trac's value prefixes.
+const TICKET_FILTER_OPERATORS: Record<string, string> = {
+  '=': '',
+  '~=': '~',
+  '!=': '!',
+  '!~=': '!~',
+};
+
 export function parseTicketFilter(expression: string): [string, string] {
-  const match = expression.match(/^([a-z][a-z0-9_]*)(~=|=)(.+)$/i);
+  const match = expression.match(/^([a-z][a-z0-9_]*)(!~=|~=|!=|=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
-    throw new ToolError('invalid_argument', `Invalid ticket filter expression: ${expression}`);
+    throw new ToolError(
+      'invalid_argument',
+      `Invalid ticket filter expression: ${expression}. Use field=value, field~=value, field!=value, or field!~=value`
+    );
   }
 
   const field = match[1].toLowerCase();
+  const operator = match[2];
+  const value = match[3];
+  if (field === 'order') {
+    if (operator !== '=' || !TICKET_ORDER_COLUMNS.has(value.toLowerCase())) {
+      throw new ToolError(
+        'invalid_argument',
+        `Unsupported sort column: ${value}. Use order=<column> with one of ${Array.from(TICKET_ORDER_COLUMNS).join(', ')}`
+      );
+    }
+    return ['order', value.toLowerCase()];
+  }
+  if (field === 'desc') {
+    if (operator !== '=' || !/^(?:1|true|0|false)$/i.test(value)) {
+      throw new ToolError('invalid_argument', `Unsupported desc value: ${value}. Use desc=1`);
+    }
+    return ['desc', /^(?:1|true)$/i.test(value) ? '1' : '0'];
+  }
   if (
     !TICKET_COLUMNS.includes(field as (typeof TICKET_COLUMNS)[number]) &&
     field !== 'description'
@@ -659,7 +689,7 @@ export function parseTicketFilter(expression: string): [string, string] {
     throw new ToolError('invalid_argument', `Unsupported ticket filter: ${field}`);
   }
 
-  return [field, match[2] === '~=' ? `~${match[3]}` : match[3]];
+  return [field, `${TICKET_FILTER_OPERATORS[operator] ?? ''}${value}`];
 }
 
 export function addTicketSearchQuery(url: URL, query: string): void {
@@ -681,7 +711,11 @@ export function addTicketSearchQuery(url: URL, query: string): void {
 
   for (const expression of trimmedQuery.split('&')) {
     const [field, value] = parseTicketFilter(expression);
-    url.searchParams.append(field, value);
+    if (QUERY_CONTROL_PARAMS.has(field)) {
+      url.searchParams.set(field, value);
+    } else {
+      url.searchParams.append(field, value);
+    }
   }
 }
 
@@ -1375,7 +1409,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                   query: {
                     type: 'string',
                     description:
-                      'Optional keywords, ticket number, or filter expressions joined by &: milestone=6.9&status=closed',
+                      'Optional keywords, ticket number, or filter expressions joined by &. Operators: = exact, ~= contains, != not equal, !~= does not contain. Add order=<column> and desc=1 to sort, for example component=Editor&status!=closed&order=changetime&desc=1',
                   },
                   limit: {
                     type: 'number',

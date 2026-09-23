@@ -92,6 +92,11 @@ read.
 }
 ```
 
+Expressions take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not
+contain. Add `order=<column>` and `desc=1` to sort, for example
+`component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are the ticket
+columns plus `time` and `changetime`.
+
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. A
 separate argument overrides the same field in `query`. Results include pagination metadata.
 
