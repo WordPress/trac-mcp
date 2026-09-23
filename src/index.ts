@@ -4,7 +4,7 @@ import { z } from 'zod';
 const JsonRpcRequestSchema = z.object({
   jsonrpc: z.literal('2.0'),
   method: z.string(),
-  params: z.record(z.unknown()).optional(),
+  params: z.record(z.string(), z.unknown()).optional(),
   id: z.union([z.string(), z.number()]).optional(),
 });
 type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
@@ -69,8 +69,8 @@ const LinkedPullRequestSchema = z.object({
     html_url: z.string().url(),
   }),
   touches_tests: z.boolean(),
-  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string())),
-  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.array(z.string()))),
+  check_runs: z.preprocess(normalizeEmptyRecord, z.record(z.string(), z.string())),
+  reviews: z.preprocess(normalizeEmptyRecord, z.record(z.string(), z.array(z.string()))),
   mergeable_state: z.string(),
   body: z.string().nullable(),
   html_url: z.string().url(),
