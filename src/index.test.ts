@@ -476,7 +476,7 @@ describe('MCP transport', () => {
     const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
       <description>Ticket description</description>
       <item><dc:creator>contributor</dc:creator><pubDate>Mon, 03 Aug 2026 10:42:01 GMT</pubDate><title>attachment set</title><link>https://core.trac.wordpress.org/ticket/65793</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;attachment&lt;/strong&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;01 example.png&lt;/span&gt;&lt;/li&gt;&lt;/ul&gt;</description></item>
-      <item><dc:creator>committer</dc:creator><pubDate>Thu, 07 Nov 2024 16:03:41 GMT</pubDate><title>status changed; resolution set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt; closed&lt;/li&gt;&lt;li&gt;&lt;strong&gt;resolution&lt;/strong&gt; fixed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;In &lt;a class=&quot;changeset&quot; href=&quot;https://core.trac.wordpress.org/changeset/59369&quot;&gt;59369&lt;/a&gt;:&lt;/p&gt;&lt;div class=&quot;message&quot;&gt;&lt;p&gt;Backport message.&lt;/p&gt;&lt;/div&gt;</description></item>
+      <item><dc:creator>committer</dc:creator><pubDate>Thu, 07 Nov 2024 16:03:41 GMT</pubDate><title>status changed; resolution set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:4</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt;         &lt;span class=&quot;trac-field-old&quot;&gt;new&lt;/span&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;closed&lt;/span&gt;           &lt;/li&gt;&lt;li&gt;&lt;strong&gt;resolution&lt;/strong&gt;         → &lt;span class=&quot;trac-field-new&quot;&gt;fixed&lt;/span&gt;           &lt;/li&gt;&lt;/ul&gt;&lt;p&gt;In &lt;a class=&quot;changeset&quot; href=&quot;https://core.trac.wordpress.org/changeset/59369&quot;&gt;59369&lt;/a&gt;:&lt;/p&gt;&lt;div class=&quot;message&quot;&gt;&lt;p&gt;Backport message.&lt;/p&gt;&lt;/div&gt;</description></item>
       <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title></title><link>https://core.trac.wordpress.org/ticket/65793#comment:5</link><description>&lt;p&gt;Useful review comment.&lt;/p&gt;</description></item>
       <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title>keywords set</title><link>https://core.trac.wordpress.org/ticket/65793#comment:6</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; needs-testing added&lt;/li&gt;&lt;/ul&gt;</description></item>
       <item><dc:creator>reporter</dc:creator><pubDate>Wed, 05 Aug 2026 19:02:00 GMT</pubDate><title>description changed</title><link>https://core.trac.wordpress.org/ticket/65793#description</link><description>&lt;p&gt;Ticket description repeated.&lt;/p&gt;</description></item>
@@ -512,7 +512,7 @@ describe('MCP transport', () => {
     expect(result.metadata.changesets).toEqual([
       expect.objectContaining({
         revision: 59369,
-        changes: 'status: closed; resolution: fixed',
+        changes: 'status: new → closed; resolution: fixed',
         message: 'Backport message.',
         url: 'https://core.trac.wordpress.org/changeset/59369',
       }),
@@ -580,6 +580,50 @@ describe('MCP transport', () => {
       }),
     ]);
     expect(result.metadata.omittedComments).toEqual([{ id: 4, author: 'watcher', reason: 'cc' }]);
+  });
+
+  it('classifies custom-field, empty, mixed-cc, and bot-authored history entries', async () => {
+    const rss = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+      <description>Ticket description</description>
+      <item><dc:creator>triager</dc:creator><pubDate>Wed, 05 Aug 2026 19:00:00 GMT</pubDate><title>customfield set</title><link>https://meta.trac.wordpress.org/ticket/5483#comment:10</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;customfield&lt;/strong&gt; → &lt;span class=&quot;trac-field-new&quot;&gt;x&lt;/span&gt;&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;note&lt;/p&gt;</description></item>
+      <item><dc:creator>someone</dc:creator><pubDate>Wed, 05 Aug 2026 19:01:00 GMT</pubDate><title></title><link>https://meta.trac.wordpress.org/ticket/5483#comment:11</link><description>&lt;p&gt;&lt;/p&gt;</description></item>
+      <item><dc:creator>reviewer</dc:creator><pubDate>Wed, 05 Aug 2026 19:02:00 GMT</pubDate><title>cc, keywords changed</title><link>https://meta.trac.wordpress.org/ticket/5483#comment:12</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;cc&lt;/strong&gt; reviewer added&lt;/li&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; needs-patch added&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Needs a patch.&lt;/p&gt;</description></item>
+      <item><dc:creator>prbot</dc:creator><pubDate>Wed, 05 Aug 2026 19:03:00 GMT</pubDate><title>keywords changed</title><link>https://meta.trac.wordpress.org/ticket/5483#comment:13</link><description>&lt;ul&gt;&lt;li&gt;&lt;strong&gt;keywords&lt;/strong&gt; has-patch added; needs-patch removed&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;&lt;em&gt;This ticket was mentioned in PR #1.&lt;/em&gt;&lt;/p&gt;</description></item>
+    </channel></rss>`;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n5483,A meta ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTicket', arguments: { id: 5483, includeComments: true } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+    const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+    expect(result.metadata.comments).toEqual([
+      expect.objectContaining({ id: 10, changes: 'customfield set' }),
+      expect.objectContaining({
+        id: 12,
+        changes: 'keywords: needs-patch added',
+        comment: 'Needs a patch.',
+      }),
+    ]);
+    expect(result.metadata.comments[0].comment).toContain('customfield');
+    expect(result.metadata.comments[0].comment).toContain('note');
+    expect(result.metadata.omittedComments).toEqual([
+      { id: 11, author: 'someone', reason: 'empty' },
+      { id: 13, author: 'prbot', reason: 'bot' },
+    ]);
   });
 
   it('keeps escaped markup in the description and in comments', async () => {

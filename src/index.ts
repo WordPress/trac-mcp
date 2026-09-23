@@ -525,7 +525,8 @@ function splitTicketHistoryDescription(html: string, origin: string, title: stri
     const label = (match[1] ?? '').match(/<strong(?:\s[^>]*)?>([^<]+)<\/strong>([\s\S]*)$/i);
     return {
       field: label?.[1]?.trim().toLowerCase() ?? '',
-      value: cleanTracText(label?.[2] ?? '', origin),
+      // A field set for the first time renders as "→ new"; the arrow says nothing on its own.
+      value: cleanTracText(label?.[2] ?? '', origin).replace(/^→\s*/, ''),
     };
   });
   const unmatched = list[1].replace(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gi, '').trim();
