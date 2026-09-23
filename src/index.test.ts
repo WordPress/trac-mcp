@@ -4,7 +4,6 @@ import worker, {
   cleanTracText,
   CORE_TRAC,
   fetchTrac,
-  GetTimelineArgsSchema,
   matchMcpRoute,
   parseCsvRecords,
   parseTicketFilter,
@@ -106,73 +105,6 @@ function timelineParams(fetchMock: ReturnType<typeof stubTimelineFetch>) {
 
 function resultDays(result: TimelineResult) {
   return result.results.map((event) => new Date(event.metadata.date).toISOString().slice(0, 10));
-}
-
-type ZodCheck = { kind: string; value?: number; regex?: RegExp };
-type ZodInternal = {
-  _def: {
-    typeName: string;
-    innerType?: ZodInternal;
-    schema?: ZodInternal;
-    options?: ZodInternal[];
-    type?: ZodInternal;
-    shape?: () => Record<string, ZodInternal>;
-    checks?: ZodCheck[];
-    minLength?: { value: number } | null;
-    maxLength?: { value: number } | null;
-    defaultValue?: () => unknown;
-  };
-};
-
-function zodCheck(def: ZodInternal['_def'], kind: string) {
-  return def.checks?.find((check) => check.kind === kind);
-}
-
-function jsonSchemaFromZodNumber(def: ZodInternal['_def']) {
-  const minimum = zodCheck(def, 'min')?.value;
-  const maximum = zodCheck(def, 'max')?.value;
-  return {
-    type: zodCheck(def, 'int') === undefined ? 'number' : 'integer',
-    ...(minimum === undefined ? {} : { minimum }),
-    ...(maximum === undefined ? {} : { maximum }),
-  };
-}
-
-// Projects the runtime schema into the JSON Schema vocabulary tools/list uses,
-// so the advertised constraints can be compared instead of the property names.
-function jsonSchemaFromZod(schema: ZodInternal): Record<string, unknown> {
-  const def = schema._def;
-  switch (def.typeName) {
-    case 'ZodOptional':
-      return jsonSchemaFromZod(def.innerType as ZodInternal);
-    case 'ZodEffects':
-      return jsonSchemaFromZod(def.schema as ZodInternal);
-    case 'ZodDefault':
-      return { ...jsonSchemaFromZod(def.innerType as ZodInternal), default: def.defaultValue?.() };
-    case 'ZodUnion':
-      return { anyOf: (def.options ?? []).map((option) => jsonSchemaFromZod(option)) };
-    case 'ZodArray':
-      return {
-        type: 'array',
-        items: jsonSchemaFromZod(def.type as ZodInternal),
-        ...(def.minLength ? { minItems: def.minLength.value } : {}),
-        ...(def.maxLength ? { maxItems: def.maxLength.value } : {}),
-      };
-    case 'ZodNumber': {
-      return jsonSchemaFromZodNumber(def);
-    }
-    case 'ZodString': {
-      const pattern = zodCheck(def, 'regex')?.regex?.source;
-      const maxLength = zodCheck(def, 'max')?.value;
-      return {
-        type: 'string',
-        ...(pattern === undefined ? {} : { pattern }),
-        ...(maxLength === undefined ? {} : { maxLength }),
-      };
-    }
-    default:
-      throw new Error(`Unsupported Zod type: ${def.typeName}`);
-  }
 }
 
 function withoutDescriptions(value: unknown): unknown {
@@ -571,6 +503,59 @@ describe('MCP transport', () => {
     });
   });
 
+  it('keeps the recent-activity path on the connected instance', async () => {
+    const fetchMock = stubTimelineFetch(timelineRss([['2026-08-05', 2]]));
+
+    const result = await callTimeline({ days: 1, limit: 2 }, '/mcp/meta');
+
+    expect(new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '').origin).toBe(
+      'https://meta.trac.wordpress.org'
+    );
+    expect(result).toMatchObject({
+      totalEvents: 2,
+      daysBack: 1,
+      timelineUrl: 'https://meta.trac.wordpress.org/timeline',
+    });
+  });
+
+  it('keeps the ChatGPT recent-activity search on the connected instance', async () => {
+    const fetchMock = stubTimelineFetch(timelineRss([['2026-08-05', 2]]));
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: 'recent activity' } },
+      },
+      '/mcp/meta/chatgpt'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    const requested = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(requested.origin).toBe('https://meta.trac.wordpress.org');
+    expect(requested.searchParams.get('max')).toBe('20');
+  });
+
+  it('reports an HTML body where the timeline RSS should be as an upstream error', async () => {
+    stubTimelineFetch('<!DOCTYPE html><html><body>Service unavailable</body></html>');
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'getTimeline', arguments: { from: '2005-01-31', to: '2005-01-31' } },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}')).toMatchObject({
+      code: 'upstream_error',
+      error: 'Trac returned HTML instead of RSS',
+    });
+  });
+
   it('excludes the previous day Trac leaks into a same-day window', async () => {
     const fetchMock = stubTimelineFetch(
       timelineRss([
@@ -581,7 +566,7 @@ describe('MCP transport', () => {
 
     const result = await callTimeline({ from: '2005-01-31', to: '2005-01-31' });
 
-    // daysback=0 is clamped to 1 upstream, so post-filtering does the trimming.
+    // The fetch asks for one day of slack, so post-filtering does the trimming.
     expect(timelineParams(fetchMock)).toMatchObject({ daysback: '1' });
     expect(resultDays(result)).toEqual(['2005-01-31', '2005-01-31']);
     expect(result).toMatchObject({
@@ -816,8 +801,16 @@ describe('MCP transport', () => {
     ['an author using Trac exclusion syntax', { author: '-saxmatt' }, 'Authors must be'],
     ['an author with a trailing space', { author: 'saxmatt ' }, 'Authors must be'],
     ['an author with a doubled space', { author: 'spaced  name' }, 'Authors must be'],
-    ['an empty author list', { author: [] }, 'at least 1 element'],
-  ])('rejects %s before an upstream request', async (_label, args, message) => {
+    ['an empty author list', { author: [] }],
+    ['days below the minimum', { days: 0 }],
+    ['days above the maximum', { days: 31 }],
+    ['limit below the minimum', { limit: 0 }],
+    ['limit above the maximum', { limit: 101 }],
+    ['a fractional limit', { limit: 1.5 }],
+    ['an author longer than 50 characters', { author: 'a'.repeat(51) }],
+    ['an unpadded date', { from: '2005-1-1' }, 'ISO-8601'],
+    ['an eleventh author', { author: Array.from({ length: 11 }, (_, i) => `user${i}`) }],
+  ])('rejects %s before an upstream request', async (_label, args, message?: string) => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);
 
@@ -830,7 +823,9 @@ describe('MCP transport', () => {
     const body = (await response.json()) as RpcBody & { error: { message: string } };
 
     expect(body.error.code).toBe(-32602);
-    expect(body.error.message).toContain(message);
+    if (message !== undefined) {
+      expect(body.error.message).toContain(message);
+    }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -843,13 +838,21 @@ describe('MCP transport', () => {
     };
     const advertised = body.result.tools.find((tool) => tool.name === 'getTimeline')?.inputSchema
       .properties;
-    const shape = (GetTimelineArgsSchema as unknown as ZodInternal)._def.schema?._def.shape?.();
+    const date = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' };
+    const author = {
+      type: 'string',
+      pattern: '^[A-Za-z0-9](?: ?[A-Za-z0-9@._-])*$',
+      maxLength: 50,
+    };
 
-    expect(withoutDescriptions(advertised)).toEqual(
-      Object.fromEntries(
-        Object.entries(shape ?? {}).map(([name, member]) => [name, jsonSchemaFromZod(member)])
-      )
-    );
+    // The boundaries here are the ones the "rejects %s" table proves the runtime enforces.
+    expect(withoutDescriptions(advertised)).toEqual({
+      days: { type: 'integer', minimum: 1, maximum: 30 },
+      from: date,
+      to: date,
+      author: { anyOf: [author, { type: 'array', items: author, minItems: 1, maxItems: 10 }] },
+      limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+    });
   });
 
   it('includes linked pull request status, checks, reviews, and changes with a ticket', async () => {

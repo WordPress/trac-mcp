@@ -42,8 +42,8 @@ const TIMELINE_DEFAULT_WINDOW_DAYS = 7;
 const TIMELINE_FETCH_MAX = 500;
 const DAY_IN_MS = 86_400_000;
 const TIMELINE_DATE_PATTERN = '^\\d{4}-\\d{2}-\\d{2}$';
-// The repository's live historical fixture starts in January 2005. Earlier
-// dates are outside the WordPress Core Trac history that this tool can verify.
+// The repository's live historical fixture starts in January 2005, the oldest
+// Core history verified; younger instances simply have no events before their own first day.
 const TIMELINE_EARLIEST_DATE = '2005-01-01';
 // A leading alphanumeric keeps user input from reaching Trac's `-author`
 // exclusion syntax, and the quote-free charset makes quoting spaced names safe.
@@ -1331,6 +1331,9 @@ function timelineEventDay(date: string): string {
 }
 
 function parseTimelineItems(rssText: string): RssItem[] {
+  if (/<!doctype html|<html/i.test(rssText)) {
+    throw new ToolError('upstream_error', 'Trac returned HTML instead of RSS');
+  }
   const items = parseRssItems(rssText);
   if (items.some((item) => Number.isNaN(Date.parse(item.date)))) {
     throw new Error('Trac timeline returned an event with a missing or invalid pubDate');
@@ -1778,7 +1781,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                   days: {
                     type: 'integer',
                     description:
-                      'Number of inclusive calendar days ending today (UTC), defaults to 7 when neither from nor to is given. Cannot be combined with from or to.',
+                      'Number of inclusive calendar days ending today (UTC), defaults to 7 when neither from nor to is given. Cannot be combined with from or to. Calls that use only days and limit pass it to Trac as daysback unchanged, the original behavior, which also includes the day before the window.',
                     minimum: 1,
                     maximum: 30,
                   },

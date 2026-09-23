@@ -97,7 +97,7 @@ separate argument overrides the same field in `query`. Results include paginatio
 
 ### Timeline ranges, authors, and coverage
 
-`getTimeline` reads the last `days` days (default 7, max 30) or an explicit `from`/`to` date range. Historical dates start at `2005-01-01`, the start of the verified WordPress Core Trac timeline used by this project, and may span at most 90 days per request because the upstream timeline caps its lookback. Dates are inclusive UTC calendar days: `days` counts whole days ending today, `from` on its own ends at today, and `to` on its own covers the seven days ending at `to`. A `to` in the future is rejected, and `days` cannot be combined with `from`/`to`:
+`getTimeline` reads the last `days` days (default 7, max 30) or an explicit `from`/`to` date range. Historical dates start at `2005-01-01`, the start of the verified WordPress Core Trac timeline (younger instances have no events before their own first day), and may span at most 90 days per request because the upstream timeline caps its lookback. Dates are inclusive UTC calendar days: `days` counts whole days ending today, `from` on its own ends at today, and `to` on its own covers the seven days ending at `to`. A `to` in the future is rejected, and `days` cannot be combined with `from`/`to`:
 
 ```json
 {
