@@ -133,6 +133,23 @@ describe('Trac parsing', () => {
     expect(() => parseTicketFilter('order~=changetime')).toThrow('Unsupported sort column');
     expect(() => parseTicketFilter('desc=yes')).toThrow('Unsupported desc value');
   });
+
+  it('rejects repeated filters on one field with different operators', () => {
+    const url = new URL('https://core.trac.wordpress.org/query');
+    addTicketSearchQuery(
+      url,
+      'status=new&status=assigned&keywords=!has-patch&keywords!=needs-patch'
+    );
+    expect(url.searchParams.getAll('status')).toEqual(['new', 'assigned']);
+    expect(url.searchParams.getAll('keywords')).toEqual(['!has-patch', '!needs-patch']);
+
+    expect(() =>
+      addTicketSearchQuery(
+        new URL('https://core.trac.wordpress.org/query'),
+        'status!=closed&status=new'
+      )
+    ).toThrow('same operator');
+  });
 });
 
 describe('ticket search pagination', () => {
@@ -1100,6 +1117,34 @@ describe('Trac instance routing', () => {
     expect(requested.searchParams.get('status')).toBe('!closed');
     expect(requested.searchParams.get('order')).toBe('changetime');
     expect(requested.searchParams.get('desc')).toBe('1');
+  });
+
+  it('refuses a sort on a column the routed instance does not configure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary\n5483,A meta ticket'))
+        .mockResolvedValueOnce(
+          new Response(
+            '<html><select name="add_filter_0"><option value="status">Status</option></select><span class="numrows">(1 match)</span></html>'
+          )
+        )
+    );
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { query: 'order=severity' } },
+      },
+      '/mcp/meta'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content.at(0)?.text ?? '').toContain('has no severity field to sort by');
   });
 
   it('refuses a filter expression naming a field only other instances configure', async () => {

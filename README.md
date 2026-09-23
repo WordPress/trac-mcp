@@ -93,7 +93,8 @@ read.
 ```
 
 Expressions take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does not
-contain. Add `order=<column>` and `desc=1` to sort, for example
+contain. Repeat a field to OR its values, with the same operator each time. Add `order=<column>`
+and `desc=1` to sort, for example
 `component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are the ticket
 columns plus `time` and `changetime`.
 
