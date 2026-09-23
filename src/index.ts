@@ -1402,14 +1402,14 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
             {
               name: 'searchTickets',
               description:
-                'Search for WordPress Trac tickets by keyword or filter expression. Returns ticket summaries with basic info.',
+                'Search WordPress Trac tickets by keyword, ticket number, or filter expressions. Returns one page of ticket summaries (id, summary, owner, type, status, priority, milestone, component) with totalFound, page, pageSize, and hasMore. Plain keywords match the ticket summary only; use description~=text to search ticket bodies. Field values differ by Trac instance, so call getTracInfo for the components, milestones, priorities, severities, types, and statuses this instance configures.',
               inputSchema: {
                 type: 'object',
                 properties: {
                   query: {
                     type: 'string',
                     description:
-                      'Optional keywords, ticket number, or filter expressions joined by &. Operators: = exact, ~= contains, != not equal, !~= does not contain. Add order=<column> and desc=1 to sort, for example component=Editor&status!=closed&order=changetime&desc=1',
+                      'Plain keywords (summary-only substring match), a ticket number such as 12345 or #12345, or filter expressions joined by &. Fields: summary, description, owner, reporter, type, status, priority, milestone, component, version, severity, resolution, keywords, cc, focuses. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values: status=new&status=assigned. Sort with order=<column> (any field above, plus time and changetime) and desc=1. Example: owner=audrasjb&keywords~=has-patch&status!=closed&order=changetime&desc=1. An expression on a field this instance does not configure is rejected rather than silently ignored.',
                   },
                   limit: {
                     type: 'number',
@@ -1423,21 +1423,24 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
                   },
                   status: {
                     type: 'string',
+                    enum: ['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing'],
                     description:
-                      'Filter by ticket status: accepted, assigned, closed, new, reopened, or reviewing',
+                      'Exact-match convenience for one status. It overrides status in query; use status=... in query for OR or negation.',
                   },
                   component: {
                     type: 'string',
                     description:
-                      "Filter by component name (e.g., 'Administration', 'Posts, Post Types')",
+                      "Exact-match convenience for one component name (e.g., 'Administration', 'Posts, Post Types'). It overrides component in query; use component~=... in query for a substring match. Call getTracInfo with type components for the names this instance uses.",
                   },
                   milestone: {
                     type: 'string',
-                    description: "Filter by milestone (e.g., '6.9')",
+                    description:
+                      "Exact-match convenience for one milestone (e.g., '6.9'). It overrides milestone in query. Call getTracInfo with type milestones for the names this instance uses.",
                   },
                   resolution: {
                     type: 'string',
-                    description: "Filter by resolution (e.g., 'fixed')",
+                    description:
+                      "Exact-match convenience for one resolution (e.g., 'fixed', 'wontfix', 'duplicate'). It overrides resolution in query.",
                   },
                 },
               },
@@ -1445,7 +1448,7 @@ export async function handleMcpRequest(instance: TracInstance, request: JsonRpcR
             {
               name: 'getTicket',
               description:
-                'Get detailed information about a specific WordPress Trac ticket including description, comments, and metadata.',
+                'Get a WordPress Trac ticket: its fields, full description, human comments (newest commentLimit of them, with totalComments and returnedComments), attachments, changesets that reference it, and linked GitHub pull requests with their check and review state. Bot comments and cc or keyword-only changes are omitted from comments.',
               inputSchema: {
                 type: 'object',
                 properties: {
