@@ -1458,16 +1458,33 @@ ${changeset.diff ? `Diff:\n${changeset.diff}` : 'No diff available'}`,
   };
 }
 
-async function fetchTracFieldOptions(
-  instance: TracInstance,
-  field: 'component' | 'severity'
-): Promise<TracInfoResult> {
-  const queryUrl = new URL(`${instance.origin}/query`);
-  queryUrl.searchParams.set(field, '');
-  const response = await fetchTrac(instance, queryUrl, {
+type TracInfoType =
+  | 'components'
+  | 'milestones'
+  | 'priorities'
+  | 'severities'
+  | 'types'
+  | 'statuses';
+
+type TracInfoResult = { data: string[]; configured: boolean };
+
+const TracFieldOptionsSchema = z.object({
+  options: z.array(z.string()),
+  optgroups: z.array(z.object({ options: z.array(z.string()) })).optional(),
+});
+
+async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promise<TracInfoResult> {
+  const field = {
+    components: 'component',
+    severities: 'severity',
+    milestones: 'milestone',
+    priorities: 'priority',
+    types: 'type',
+    statuses: 'status',
+  }[type];
+  const response = await fetchTrac(instance, new URL(`${instance.origin}/query`), {
     headers: { 'User-Agent': TRAC_USER_AGENT },
   });
-
   if (!response.ok) {
     throw upstreamHttpError(response);
   }
@@ -1481,58 +1498,17 @@ async function fetchTracFieldOptions(
     return { data: [], configured: false };
   }
 
-  // The field exists here, so a missing option list is a parse failure rather than an answer.
-  const select = html.match(
-    new RegExp(`<select[^>]*\\bname="0_${field}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i')
-  )?.[1];
-  if (!select) {
+  try {
+    const json = html.match(/\bvar\s+properties\s*=\s*(\{(?:[^";]|"(?:\\.|[^"\\])*")*\})\s*;/)?.[1];
+    const properties = z.record(z.string(), z.unknown()).parse(JSON.parse(json ?? ''));
+    const { options, optgroups } = TracFieldOptionsSchema.parse(properties[field]);
+    return {
+      data: [...options, ...(optgroups ?? []).flatMap((group) => group.options)],
+      configured: true,
+    };
+  } catch {
     throw new ToolError('upstream_error', `Trac did not return ${field} options`);
   }
-
-  return {
-    data: Array.from(select.matchAll(/<option[^>]*value="([^"]+)"[^>]*>/gi), (match) =>
-      cleanTracText(match[1] ?? '', instance.origin)
-    ).filter(Boolean),
-    configured: true,
-  };
-}
-
-type TracInfoType =
-  | 'components'
-  | 'milestones'
-  | 'priorities'
-  | 'severities'
-  | 'types'
-  | 'statuses';
-
-/*
- * Whether the instance configures the field at all, which only the picker-backed
- * types can answer. The rest read values off tickets, where an empty result means
- * no ticket carried one rather than no such field.
- */
-type TracInfoResult = { data: string[]; configured: boolean };
-
-async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promise<TracInfoResult> {
-  if (type === 'components' || type === 'severities') {
-    return fetchTracFieldOptions(instance, type === 'components' ? 'component' : 'severity');
-  }
-
-  const fieldByType = {
-    milestones: 'milestone',
-    priorities: 'priority',
-    types: 'type',
-    statuses: 'status',
-  } as const;
-  const field = fieldByType[type];
-  const queryUrl = new URL(`${instance.origin}/query`);
-  queryUrl.searchParams.set('format', 'csv');
-  queryUrl.searchParams.set('max', '1000');
-  addColumns(queryUrl, [field]);
-
-  const values = (await fetchCsvRecords(instance, queryUrl))
-    .map((record) => record[field]?.trim() ?? '')
-    .filter(Boolean);
-  return { data: Array.from(new Set(values)).sort(), configured: true };
 }
 
 type TimelineWindow = { from: string; to: string };
