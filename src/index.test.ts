@@ -198,7 +198,10 @@ function linkedPullRequestFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function getTicketWithLinkedPullRequest(pullRequest = linkedPullRequestFixture()) {
+async function getTicketWithLinkedPullRequest(
+  pullRequest = linkedPullRequestFixture(),
+  viaChatGptFetch = false
+) {
   const fetchMock = vi
     .fn<typeof fetch>()
     .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
@@ -210,15 +213,25 @@ async function getTicketWithLinkedPullRequest(pullRequest = linkedPullRequestFix
     .mockResolvedValueOnce(Response.json([pullRequest]));
   vi.stubGlobal('fetch', fetchMock);
 
-  const response = await mcpRequest({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/call',
-    params: {
-      name: 'getTicket',
-      arguments: { id: 65808, includeComments: true, commentLimit: 10 },
-    },
-  });
+  const response = viaChatGptFetch
+    ? await mcpRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'fetch', arguments: { id: '65808' } },
+        },
+        '/mcp/chatgpt'
+      )
+    : await mcpRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'getTicket',
+          arguments: { id: 65808, includeComments: true, commentLimit: 10 },
+        },
+      });
   const body = (await response.json()) as RpcBody;
 
   return {
@@ -1165,8 +1178,57 @@ describe('MCP transport', () => {
     });
   });
 
+  it.each([
+    { name: 'getTicket', path: '/mcp', id: 65808, includesHistory: false },
+    { name: 'fetch', path: '/mcp/chatgpt', id: '65808', includesHistory: true },
+  ])(
+    '$name includes history in text: $includesHistory',
+    async ({ name, path, id, includesHistory }) => {
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(new Response('id,summary,status\n65808,REST API ticket,closed'))
+          .mockResolvedValueOnce(
+            new Response(`<?xml version="1.0"?><rss><channel>
+            <description>Ticket description</description>
+            <item><dc:creator>reviewer</dc:creator><link>https://core.trac.wordpress.org/ticket/65808#comment:1</link><description>Useful review comment.</description></item>
+          </channel></rss>`)
+          )
+          .mockResolvedValueOnce(Response.json([linkedPullRequestFixture()]))
+      );
+
+      const response = await mcpRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name, arguments: { id } },
+        },
+        path
+      );
+      const body = (await response.json()) as RpcBody;
+      const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
+
+      expect(result.id).toBe(id);
+      expect(result.text).toContain('Ticket #65808: REST API ticket');
+      expect(result.text).toContain('Description:\nTicket description');
+      expect(result.metadata.comments).toEqual([
+        expect.objectContaining({ comment: 'Useful review comment.' }),
+      ]);
+      expect(result.metadata.linkedPullRequests).toEqual([
+        expect.objectContaining({ body: 'Pull request description' }),
+      ]);
+      expect(result.text.includes('Useful review comment.')).toBe(includesHistory);
+      expect(result.text.includes('Pull request description')).toBe(includesHistory);
+    }
+  );
+
   it('includes linked pull request status, checks, reviews, and changes with a ticket', async () => {
-    const { fetchMock, result } = await getTicketWithLinkedPullRequest();
+    const { fetchMock, result } = await getTicketWithLinkedPullRequest(
+      linkedPullRequestFixture(),
+      true
+    );
 
     expect(fetchMock.mock.calls[2]?.[0]?.toString()).toBe(
       'https://api.wordpress.org/dotorg/trac/pr/?trac=core&ticket=65808'
@@ -1180,6 +1242,7 @@ describe('MCP transport', () => {
         touchesTests: true,
         additions: 234,
         deletions: 45,
+        body: 'Pull request description',
       }),
     ]);
     expect(result.metadata.linkedPullRequestsUnavailable).toBe(false);
@@ -1207,7 +1270,10 @@ describe('MCP transport', () => {
   ])(
     'normalizes an empty linked pull request $label',
     async ({ overrides, expectedCheckRuns, expectedReviews, expectedText }) => {
-      const { result } = await getTicketWithLinkedPullRequest(linkedPullRequestFixture(overrides));
+      const { result } = await getTicketWithLinkedPullRequest(
+        linkedPullRequestFixture(overrides),
+        true
+      );
 
       expect(result.metadata.linkedPullRequests).toEqual([
         expect.objectContaining({
@@ -1244,15 +1310,15 @@ describe('MCP transport', () => {
         .mockResolvedValueOnce(response())
     );
 
-    const responseFromWorker = await mcpRequest({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: {
-        name: 'getTicket',
-        arguments: { id: 65808, includeComments: true, commentLimit: 10 },
+    const responseFromWorker = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'fetch', arguments: { id: '65808' } },
       },
-    });
+      '/mcp/chatgpt'
+    );
     const body = (await responseFromWorker.json()) as RpcBody;
     const result = JSON.parse(body.result.content.at(0)?.text ?? '{}');
 
@@ -1329,15 +1395,36 @@ describe('MCP transport', () => {
       { id: 8, author: 'prbot', reason: 'bot' },
       { id: 9, author: 'watcher', reason: 'cc' },
     ]);
-    expect(result.text).toContain('Attachments:');
-    expect(result.text).toContain('Changesets:');
-    expect(result.text).toContain('Recent comments:');
-    expect(result.text).toContain(
+    expect(result.text).not.toMatch(/Attachments:|Changesets:|Recent comments:|Omitted comments:/);
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('id,summary,status\n65793,Accessibility ticket,new'))
+        .mockResolvedValueOnce(new Response(rss))
+    );
+    const fetchResponse = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'fetch', arguments: { id: '65793' } },
+      },
+      '/mcp/chatgpt'
+    );
+    const fetchBody = (await fetchResponse.json()) as RpcBody;
+    const fetchResult = JSON.parse(fetchBody.result.content.at(0)?.text ?? '{}');
+
+    expect(fetchResult.text).toContain('Attachments:');
+    expect(fetchResult.text).toContain('Changesets:');
+    expect(fetchResult.text).toContain('Recent comments:');
+    expect(fetchResult.text).toContain(
       'Omitted comments: 7 (slackbot, bot); 8 (prbot, bot); 9 (watcher, cc)'
     );
-    expect(result.text).not.toContain('Slack mention.');
-    expect(result.text).not.toContain('Pull request relay.');
-    expect(result.text).not.toContain('Ticket description repeated.');
+    expect(fetchResult.text).not.toContain('Slack mention.');
+    expect(fetchResult.text).not.toContain('Pull request relay.');
+    expect(fetchResult.text).not.toContain('Ticket description repeated.');
   });
 
   it('keeps a bulleted list in a plain comment as prose, not field changes', async () => {
@@ -2057,6 +2144,7 @@ describe('Trac instance routing', () => {
     const text = body.result.content.at(0)?.text ?? '';
     expect(text).toContain('has no component field');
     expect(text).toContain('keywords, status');
+    expect(JSON.parse(text).code).toBe('invalid_argument');
   });
 
   it('does not treat sort controls as filter fields the instance must configure', async () => {
@@ -2116,7 +2204,9 @@ describe('Trac instance routing', () => {
     const body = (await response.json()) as RpcBody;
 
     expect(body.result.isError).toBe(true);
-    expect(body.result.content.at(0)?.text ?? '').toContain('has no severity field to sort by');
+    const text = body.result.content.at(0)?.text ?? '';
+    expect(text).toContain('has no severity field to sort by');
+    expect(JSON.parse(text).code).toBe('invalid_argument');
   });
 
   it('refuses a filter expression naming a field only other instances configure', async () => {
@@ -2144,7 +2234,9 @@ describe('Trac instance routing', () => {
     const body = (await response.json()) as RpcBody;
 
     expect(body.result.isError).toBe(true);
-    expect(body.result.content.at(0)?.text).toContain('has no focuses field');
+    const text = body.result.content.at(0)?.text ?? '';
+    expect(text).toContain('has no focuses field');
+    expect(JSON.parse(text).code).toBe('invalid_argument');
   });
 
   it('allows a search filtering on a field the routed instance does configure', async () => {
