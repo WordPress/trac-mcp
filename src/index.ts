@@ -1185,7 +1185,7 @@ function formatTicketResult(
   instance: TracInstance,
   ticketData: Awaited<ReturnType<typeof fetchTicket>>,
   includeComments: boolean,
-  stringId = false
+  forChatGpt = false
 ) {
   const {
     ticket,
@@ -1257,7 +1257,7 @@ ${pullRequest.body || 'No pull request description'}`;
     : '';
 
   return {
-    id: stringId ? ticket.id.toString() : ticket.id,
+    id: forChatGpt ? ticket.id.toString() : ticket.id,
     title: `#${ticket.id}: ${ticket.summary}`,
     text: `Ticket #${ticket.id}: ${ticket.summary}
 
@@ -1275,7 +1275,7 @@ Keywords: ${ticket.keywords}
 Focuses: ${ticket.focuses}
 
 Description:
-${ticket.description}${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}${omittedText}`,
+${ticket.description}${forChatGpt ? `${linkedPullRequestsText}${attachmentsText}${changesetsText}${historyText}${omittedText}` : ''}`,
     url: `${instance.origin}/ticket/${ticket.id}`,
     metadata: {
       ticket,
