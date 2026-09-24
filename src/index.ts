@@ -23,10 +23,13 @@ const SearchTicketsArgsSchema = z.object({
     .describe('Maximum number of results to return (default: 10, max: 50)'),
   page: z.number().int().min(1).default(1).describe('One-based results page (default: 1)'),
   status: z
-    .enum(['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing'])
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
     .optional()
     .describe(
-      'Exact-match convenience for one status. It overrides status in query; use status=... in query for OR or negation.'
+      'Exact-match convenience for one status value. Values differ by instance; call getTracInfo with type statuses for the values this instance uses. It overrides status in query; use status=... in query for OR or negation.'
     ),
   component: z
     .string()
@@ -932,6 +935,22 @@ const TICKET_ORDER_COLUMNS = new Set<string>([...TICKET_COLUMNS, 'time', 'change
 // Sort columns that never appear in a query page's filter picker.
 const TICKET_ORDER_COLUMNS_UNFILTERED = new Set(['id', 'time', 'changetime']);
 
+// Rejects a status convenience argument the instance doesn't have; unparseable options leave it unvalidated.
+function checkStatusFilter(instance: TracInstance, totalHtml: string, status: string): void {
+  let statuses: string[] | undefined;
+  try {
+    statuses = tracFieldOptions(totalHtml, 'status');
+  } catch {
+    statuses = undefined;
+  }
+  if (statuses && !statuses.includes(status)) {
+    throw new ToolError(
+      'invalid_argument',
+      `${tracDisplayName(instance)} has no "${status}" status. Statuses available here: ${statuses.join(', ')}`
+    );
+  }
+}
+
 export function parseTicketFilter(expression: string): [string, string] {
   const match = expression.match(/^([a-z][a-z0-9_]*)(!?~?=)(.+)$/i);
   if (!match?.[1] || !match[2] || !match[3]) {
@@ -1174,6 +1193,9 @@ export async function searchTracTickets(
         'invalid_argument',
         `${tracDisplayName(instance)} has no ${order} field to sort by, so Trac would fall back to its default order. Fields available here: ${Array.from(configured).sort().join(', ')}`
       );
+    }
+    if (filters.status) {
+      checkStatusFilter(instance, totalHtml, filters.status);
     }
   }
 
@@ -1473,6 +1495,14 @@ const TracFieldOptionsSchema = z.object({
   optgroups: z.array(z.object({ options: z.array(z.string()) })).optional(),
 });
 
+// A query page's embedded option list for one field, in Trac's order, flattened out of any optgroups.
+function tracFieldOptions(html: string, field: string): string[] {
+  const json = html.match(/\bvar\s+properties\s*=\s*(\{(?:[^";]|"(?:\\.|[^"\\])*")*\})\s*;/)?.[1];
+  const properties = z.record(z.string(), z.unknown()).parse(JSON.parse(json ?? ''));
+  const { options, optgroups } = TracFieldOptionsSchema.parse(properties[field]);
+  return [...options, ...(optgroups ?? []).flatMap((group) => group.options)];
+}
+
 async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promise<TracInfoResult> {
   const field = {
     components: 'component',
@@ -1499,13 +1529,7 @@ async function fetchTracInfo(instance: TracInstance, type: TracInfoType): Promis
   }
 
   try {
-    const json = html.match(/\bvar\s+properties\s*=\s*(\{(?:[^";]|"(?:\\.|[^"\\])*")*\})\s*;/)?.[1];
-    const properties = z.record(z.string(), z.unknown()).parse(JSON.parse(json ?? ''));
-    const { options, optgroups } = TracFieldOptionsSchema.parse(properties[field]);
-    return {
-      data: [...options, ...(optgroups ?? []).flatMap((group) => group.options)],
-      configured: true,
-    };
+    return { data: tracFieldOptions(html, field), configured: true };
   } catch {
     throw new ToolError('upstream_error', `Trac did not return ${field} options`);
   }
