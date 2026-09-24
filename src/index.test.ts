@@ -1,3 +1,4 @@
+import { McpServer } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker, {
   addTicketSearchQuery,
@@ -242,6 +243,7 @@ async function getTicketWithLinkedPullRequest(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -594,9 +596,53 @@ describe('MCP transport', () => {
     ],
   ])('refuses %s', async (_, body, status, code) => {
     const response = await mcpRequest(body);
+    const payload = (await response.json()) as RpcBody & { id: unknown };
 
     expect(response.status).toBe(status);
-    expect(((await response.json()) as RpcBody).error.code).toBe(code);
+    expect(payload.error.code).toBe(code);
+    expect(payload.id).toBeNull();
+  });
+
+  it('closes a handshake-era server when its client disconnects mid-call', async () => {
+    const upstream = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal('fetch', upstream);
+    const close = vi.spyOn(McpServer.prototype, 'close');
+    const controller = new AbortController();
+
+    void worker.fetch(
+      new Request('https://example.com/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'getTracInfo', arguments: { type: 'types' } },
+        }),
+        signal: controller.signal,
+      }),
+      {},
+      context
+    );
+    await vi.waitFor(() => expect(upstream).toHaveBeenCalled());
+    expect(close).not.toHaveBeenCalled();
+    controller.abort();
+
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
+  });
+
+  it('answers an internal failure on the handshake-era path as a JSON-RPC error', async () => {
+    vi.spyOn(McpServer.prototype, 'connect').mockRejectedValueOnce(new Error('boom'));
+
+    const response = await mcpRequest({ jsonrpc: '2.0', id: 42, method: 'tools/list' });
+    const payload = (await response.json()) as RpcBody & { id: unknown };
+
+    expect(response.status).toBe(500);
+    expect(payload.error.code).toBe(-32603);
+    expect(payload.id).toBe(42);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
   });
 
   it('does not open subscription streams for tools that never change', async () => {
@@ -608,8 +654,11 @@ describe('MCP transport', () => {
       params: INITIALIZE_PARAMS,
     });
 
+    const refusal = (await listen.json()) as RpcBody & { id: unknown };
+
     expect(listen.status).toBe(404);
-    expect(((await listen.json()) as RpcBody).error.code).toBe(-32601);
+    expect(refusal.error.code).toBe(-32601);
+    expect(refusal.id).toBe(1);
     expect(
       (
         (await initialize.json()) as {
@@ -1972,7 +2021,7 @@ describe('Trac instance routing', () => {
         result: {
           protocolVersion: '2025-06-18',
           capabilities: { tools: {} },
-          serverInfo: { name: 'WordPress Trac', version: '1.1.0' },
+          serverInfo: { name: 'WordPress Trac', version: '1.2.0' },
         },
       });
     }

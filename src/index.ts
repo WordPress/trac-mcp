@@ -1903,7 +1903,7 @@ async function executeStandardTool(
   }
 }
 
-const SERVER_VERSION = '1.1.0';
+const SERVER_VERSION = '1.2.0';
 
 const STANDARD_TOOLS = [
   {
@@ -2390,11 +2390,21 @@ const MCP_CORS_HEADERS = {
 // Tool arguments are a few hundred bytes; the SDK's own body limit is skipped because we parse first.
 const MCP_MAX_BODY_BYTES = 65_536;
 
-function jsonRpcErrorResponse(status: number, code: number, message: string): Response {
-  return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code, message } }), {
+function jsonRpcErrorResponse(
+  status: number,
+  code: number,
+  message: string,
+  id: string | number | null = null
+): Response {
+  return new Response(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }), {
     status,
     headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
   });
+}
+
+function jsonRpcRequestId(body: unknown): string | number | null {
+  const id = (body as { id?: unknown } | null)?.id;
+  return typeof id === 'string' || typeof id === 'number' ? id : null;
 }
 
 /**
@@ -2483,16 +2493,23 @@ async function serveLegacyMcpRequest(
   request: Request,
   body: unknown
 ): Promise<Response> {
-  const server = createTracServer(route);
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-  });
-  await server.connect(transport);
   try {
-    return await transport.handleRequest(request, { parsedBody: body });
-  } finally {
-    await server.close();
+    const server = createTracServer(route);
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+    const teardown = () => Promise.allSettled([transport.close(), server.close()]);
+    request.signal.addEventListener('abort', teardown, { once: true });
+    try {
+      await server.connect(transport);
+      return await transport.handleRequest(request, { parsedBody: body });
+    } finally {
+      request.signal.removeEventListener('abort', teardown);
+      await teardown();
+    }
+  } catch {
+    return jsonRpcErrorResponse(500, -32603, 'Internal server error', jsonRpcRequestId(body));
   }
 }
 
@@ -2522,7 +2539,7 @@ async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<
   }
   // The tools never change, and each listen stream would hold an isolate-wide subscription slot.
   if ((body as { method?: unknown } | null)?.method === 'subscriptions/listen') {
-    return jsonRpcErrorResponse(404, -32601, 'Method not found');
+    return jsonRpcErrorResponse(404, -32601, 'Method not found', jsonRpcRequestId(body));
   }
 
   // Clients were served before without these headers, which the SDK transport requires.

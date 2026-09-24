@@ -244,7 +244,7 @@ pnpm run deploy:production
 
 - The server is read-only and has no Trac credentials.
 - The MCP protocol layer is the official TypeScript SDK. Each endpoint serves stateless 2026-07-28
-  clients and handshake-era clients (2024-11-05 through 2025-11-25), answering the latter with plain
+  clients and handshake-era clients (2024-10-07 through 2025-11-25), answering the latter with plain
   JSON. The advertised input schemas are generated from the same Zod schemas that validate calls.
 - Tool inputs receive runtime validation before any upstream request.
 - Upstream requests stay on `*.trac.wordpress.org` and the official linked-PR endpoint on
