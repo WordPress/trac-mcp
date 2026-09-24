@@ -1963,7 +1963,10 @@ Query Types:
  * @return A server exposing the standard tools, or the ChatGPT search and fetch pair.
  */
 function createTracServer({ instance, chatGpt }: McpRoute): McpServer {
-  const server = new McpServer({ name: tracDisplayName(instance), version: SERVER_VERSION });
+  const server = new McpServer(
+    { name: tracDisplayName(instance), version: SERVER_VERSION },
+    { capabilities: { tools: { listChanged: false } } }
+  );
   const execute = chatGpt ? executeChatGptTool : executeStandardTool;
   for (const tool of chatGpt ? CHATGPT_TOOLS : STANDARD_TOOLS) {
     server.registerTool(
@@ -2382,6 +2385,45 @@ const MCP_CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name',
 };
 
+// Tool arguments are a few hundred bytes; the SDK's own body limit is skipped because we parse first.
+const MCP_MAX_BODY_BYTES = 65_536;
+
+function jsonRpcErrorResponse(status: number, code: number, message: string): Response {
+  return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code, message } }), {
+    status,
+    headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
+  });
+}
+
+/**
+ * Read a request body as text, stopping as soon as it exceeds a byte limit.
+ *
+ * @param request Incoming request.
+ * @param limit Maximum body size in bytes.
+ * @return The body text, or null when the body is larger than the limit.
+ */
+async function readBoundedText(request: Request, limit: number): Promise<string | null> {
+  const reader = request.body?.getReader();
+  if (!reader) {
+    return '';
+  }
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      return text + decoder.decode();
+    }
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return null;
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
 type McpRoute = {
   instance: TracInstance;
   chatGpt: boolean;
@@ -2463,14 +2505,22 @@ async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<
     });
   }
 
+  const text = await readBoundedText(request, MCP_MAX_BODY_BYTES);
+  if (text === null) {
+    return jsonRpcErrorResponse(413, -32600, 'Request body too large');
+  }
   let body: unknown;
   try {
-    body = await request.json();
+    body = JSON.parse(text);
   } catch {
-    return new Response(
-      JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } }),
-      { status: 400, headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' } }
-    );
+    return jsonRpcErrorResponse(400, -32700, 'Parse error');
+  }
+  if (Array.isArray(body)) {
+    return jsonRpcErrorResponse(400, -32600, 'Batch requests are not supported');
+  }
+  // The tools never change, and each listen stream would hold an isolate-wide subscription slot.
+  if ((body as { method?: unknown } | null)?.method === 'subscriptions/listen') {
+    return jsonRpcErrorResponse(404, -32601, 'Method not found');
   }
 
   // Clients were served before without these headers, which the SDK transport requires.
@@ -2480,7 +2530,7 @@ async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<
   if (!accept.includes('application/json') || !accept.includes('text/event-stream')) {
     headers.set('Accept', 'application/json, text/event-stream');
   }
-  const normalized = new Request(request.url, { method: 'POST', headers });
+  const normalized = new Request(request.url, { method: 'POST', headers, signal: request.signal });
 
   const response = (await isLegacyRequest(normalized, body))
     ? await serveLegacyMcpRequest(route, normalized, body)

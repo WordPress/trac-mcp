@@ -67,23 +67,30 @@ const INITIALIZE_PARAMS = {
   clientInfo: { name: 'test', version: '1' },
 };
 
-function modernRequest(path: string, method: string) {
+function modernRequest(
+  path: string,
+  method: string,
+  params: { name?: string; arguments?: unknown } = {},
+  version = '2026-07-28'
+) {
   return worker.fetch(
     new Request(`https://example.com${path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
-        'MCP-Protocol-Version': '2026-07-28',
+        'MCP-Protocol-Version': version,
         'Mcp-Method': method,
+        ...(params.name === undefined ? {} : { 'Mcp-Name': params.name }),
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
         method,
         params: {
+          ...params,
           _meta: {
-            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/protocolVersion': version,
             'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1' },
             'io.modelcontextprotocol/clientCapabilities': {},
           },
@@ -482,31 +489,35 @@ describe('MCP transport', () => {
     expect(body.result.tools.map((tool) => tool.name)).toEqual(['search', 'fetch']);
   });
 
+  it('reads a stateless 2026-07-28 tool call from the instance its path names', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '<form id="query"><select id="add_filter_0"><option value="type"></option></select><select name="0_type"><option>defect</option></select></form>'
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await modernRequest('/mcp/meta', 'tools/call', {
+      name: 'getTracInfo',
+      arguments: { type: 'types' },
+    });
+    const body = (await response.json()) as RpcBody;
+
+    expect(response.status).toBe(200);
+    expect(body.result.isError).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalled();
+    for (const [url] of fetchMock.mock.calls) {
+      expect(new URL(String(url)).origin).toBe('https://meta.trac.wordpress.org');
+    }
+  });
+
   it('names its supported versions when a client asks for one it does not speak', async () => {
-    const response = await worker.fetch(
-      new Request('https://example.com/mcp', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'MCP-Protocol-Version': '2099-01-01',
-          'Mcp-Method': 'tools/list',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/list',
-          params: {
-            _meta: {
-              'io.modelcontextprotocol/protocolVersion': '2099-01-01',
-              'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1' },
-              'io.modelcontextprotocol/clientCapabilities': {},
-            },
-          },
-        }),
-      }),
-      {},
-      context
-    );
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await modernRequest('/mcp', 'tools/list', {}, '2099-01-01');
     const body = (await response.json()) as {
       error: { code: number; data: { supported: string[] } };
     };
@@ -514,6 +525,85 @@ describe('MCP transport', () => {
     expect(response.status).toBe(400);
     expect(body.error.code).toBe(-32022);
     expect(body.error.data.supported).toContain('2026-07-28');
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('answers a client that sends neither Accept nor Content-Type with plain JSON', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.com/mcp', {
+        method: 'POST',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      }),
+      {},
+      context
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toContain('application/json');
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+    expect(((await response.json()) as RpcBody).error).toBeUndefined();
+  });
+
+  it('advertises the argument descriptions and read-only hints its Zod schemas carry', async () => {
+    const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const { tools } = (
+      (await response.json()) as {
+        result: {
+          tools: Array<{
+            name: string;
+            annotations: { readOnlyHint: boolean };
+            inputSchema: { properties: Record<string, { description?: string }> };
+          }>;
+        };
+      }
+    ).result;
+    const search = tools.find((tool) => tool.name === 'searchTickets');
+
+    const { query } = search?.inputSchema.properties ?? {};
+
+    expect(query?.description).toContain('order=<column>');
+    for (const tool of tools) {
+      expect(tool.annotations.readOnlyHint).toBe(true);
+      for (const [name, property] of Object.entries(tool.inputSchema.properties)) {
+        expect(property.description, `${tool.name}.${name}`).toBeTruthy();
+      }
+    }
+  });
+
+  it.each([
+    ['a batch', [{ jsonrpc: '2.0', id: 1, method: 'ping' }], 400, -32600],
+    [
+      'a body over 64 KiB',
+      { jsonrpc: '2.0', id: 1, method: 'ping', pad: 'x'.repeat(70_000) },
+      413,
+      -32600,
+    ],
+  ])('refuses %s', async (_, body, status, code) => {
+    const response = await mcpRequest(body);
+
+    expect(response.status).toBe(status);
+    expect(((await response.json()) as RpcBody).error.code).toBe(code);
+  });
+
+  it('does not open subscription streams for tools that never change', async () => {
+    const listen = await modernRequest('/mcp', 'subscriptions/listen');
+    const initialize = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: INITIALIZE_PARAMS,
+    });
+
+    expect(listen.status).toBe(404);
+    expect(((await listen.json()) as RpcBody).error.code).toBe(-32601);
+    expect(
+      (
+        (await initialize.json()) as {
+          result: { capabilities: { tools: { listChanged: boolean } } };
+        }
+      ).result.capabilities.tools.listChanged
+    ).toBe(false);
   });
 
   it.each([
