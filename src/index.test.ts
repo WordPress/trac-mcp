@@ -1937,6 +1937,7 @@ describe('Trac instance routing', () => {
     const text = body.result.content.at(0)?.text ?? '';
     expect(text).toContain('has no component field');
     expect(text).toContain('keywords, status');
+    expect(JSON.parse(text).code).toBe('invalid_argument');
   });
 
   it('does not treat sort controls as filter fields the instance must configure', async () => {
@@ -1996,7 +1997,9 @@ describe('Trac instance routing', () => {
     const body = (await response.json()) as RpcBody;
 
     expect(body.result.isError).toBe(true);
-    expect(body.result.content.at(0)?.text ?? '').toContain('has no severity field to sort by');
+    const text = body.result.content.at(0)?.text ?? '';
+    expect(text).toContain('has no severity field to sort by');
+    expect(JSON.parse(text).code).toBe('invalid_argument');
   });
 
   it('refuses a filter expression naming a field only other instances configure', async () => {
@@ -2024,7 +2027,9 @@ describe('Trac instance routing', () => {
     const body = (await response.json()) as RpcBody;
 
     expect(body.result.isError).toBe(true);
-    expect(body.result.content.at(0)?.text).toContain('has no focuses field');
+    const text = body.result.content.at(0)?.text ?? '';
+    expect(text).toContain('has no focuses field');
+    expect(JSON.parse(text).code).toBe('invalid_argument');
   });
 
   it('allows a search filtering on a field the routed instance does configure', async () => {
