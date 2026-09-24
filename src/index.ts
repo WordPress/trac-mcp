@@ -1090,13 +1090,15 @@ export async function searchTracTickets(
   if (configured) {
     const unsupported = filterFields.filter((field) => !configured.has(field));
     if (unsupported.length) {
-      throw new Error(
+      throw new ToolError(
+        'invalid_argument',
         `${tracDisplayName(instance)} has no ${unsupported.join(' or ')} field, so filtering on it would return every ticket. Fields available here: ${Array.from(configured).sort().join(', ')}`
       );
     }
     const order = queryUrl.searchParams.get('order');
     if (order && !configured.has(order) && !TICKET_ORDER_COLUMNS_UNFILTERED.has(order)) {
-      throw new Error(
+      throw new ToolError(
+        'invalid_argument',
         `${tracDisplayName(instance)} has no ${order} field to sort by, so Trac would fall back to its default order. Fields available here: ${Array.from(configured).sort().join(', ')}`
       );
     }
