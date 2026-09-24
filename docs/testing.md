@@ -25,7 +25,7 @@ Start the Worker by following [local-development.md](local-development.md), then
 
 1. Confirm `/health` returns `200 OK` and `/` renders the landing page.
 2. Send `OPTIONS /mcp`; expect `204` and CORS headers.
-3. Initialize `/mcp`, send `ping`, and list tools.
+3. Initialize `/mcp`, send `ping`, and list tools. Then list tools with `MCP-Protocol-Version: 2026-07-28` and expect `400` with code `-32600`.
 4. Exercise each standard tool:
    - Search a keyword and a structured filter.
    - Read ticket `65739` with and without comments.

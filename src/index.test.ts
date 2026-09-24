@@ -401,6 +401,9 @@ describe('MCP transport', () => {
 
     expect(response.status).toBe(204);
     expect(response.headers.get('Access-Control-Allow-Methods')).toBe('POST, OPTIONS');
+    expect(response.headers.get('Access-Control-Allow-Headers')).toBe(
+      'Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name'
+    );
   });
 
   it('supports ping and initialized notifications', async () => {
@@ -428,6 +431,82 @@ describe('MCP transport', () => {
 
     const invalid = await mcpRequest({ jsonrpc: '2.0', id: 1 });
     expect(((await invalid.json()) as RpcBody).error.code).toBe(-32600);
+  });
+
+  it.each([
+    ['a modern header', { 'MCP-Protocol-Version': '2026-07-28' }, undefined, '/mcp', '2026-07-28'],
+    [
+      'a modern body version',
+      {},
+      { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
+      '/mcp',
+      '2026-07-28',
+    ],
+    [
+      'an unknown header',
+      { 'MCP-Protocol-Version': '1900-01-01' },
+      undefined,
+      '/mcp/meta/chatgpt',
+      '1900-01-01',
+    ],
+    [
+      'a modern body version alongside a supported header',
+      { 'MCP-Protocol-Version': '2025-06-18' },
+      { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
+      '/mcp',
+      '2026-07-28',
+    ],
+  ])(
+    'rejects %s so dual-era clients fall back to initialize',
+    async (_, headers, meta, path, expectedVersion) => {
+      const fetchMock = vi.fn<typeof fetch>();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const response = await worker.fetch(
+        new Request(`https://example.com${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 7,
+            method: 'tools/list',
+            params: meta ? { _meta: meta } : {},
+          }),
+        }),
+        {},
+        context
+      );
+      const body = (await response.json()) as {
+        id: number;
+        error: { code: number; message: string };
+      };
+
+      expect(response.status).toBe(400);
+      expect(body.id).toBe(7);
+      expect(body.error.code).toBe(-32600);
+      expect(body.error.message).toContain(expectedVersion);
+      expect(body.error.message).toContain('2024-11-05');
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['tools/list', '2024-11-05'],
+    ['tools/list', '2025-06-18'],
+    ['initialize', '2026-07-28'],
+  ])('serves %s with protocol version header %s', async (method, version) => {
+    const response = await worker.fetch(
+      new Request('https://example.com/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'MCP-Protocol-Version': version },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: {} }),
+      }),
+      {},
+      context
+    );
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as RpcBody).result).toBeDefined();
   });
 
   it('rejects invalid tool arguments before an upstream request', async () => {

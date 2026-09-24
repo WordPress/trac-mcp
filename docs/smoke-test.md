@@ -63,6 +63,15 @@ Expect `serverInfo` naming the server, `"result":{}` for the ping, and all five 
 
 The server currently answers with `"protocolVersion":"2024-11-05"` even though the request above advertises `2025-06-18`. That is the server pinning the version it implements, not a failure.
 
+A client on the stateless 2026-07-28 revision gets an honest refusal instead of a 2024-11-05 answer it cannot parse:
+
+```bash
+curl -s -w '\n%{http_code}\n' -X POST "$BASE/mcp" -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+Expect `400` with error code `-32600` and a message naming 2024-11-05. The code is deliberately not the modern `-32022`: a plain error is what tells a client that speaks both revisions to fall back to `initialize`. `uvx mcp-explorer doctor "$BASE/mcp"` should report the stateless mode with that message and the legacy mode as ok.
+
 ## 3. Tools
 
 Use these public fixtures only. Each one is here because it covers a distinct parsing path.
