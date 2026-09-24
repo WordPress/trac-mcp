@@ -1,38 +1,83 @@
+import {
+  McpServer,
+  WebStandardStreamableHTTPServerTransport,
+  createMcpHandler,
+  isLegacyRequest,
+} from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
-// JSON-RPC 2.0 message schemas
-const JsonRpcRequestSchema = z.object({
-  jsonrpc: z.literal('2.0'),
-  method: z.string(),
-  params: z.record(z.string(), z.unknown()).optional(),
-  id: z.union([z.string(), z.number()]).optional(),
-});
-type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
-
-const ToolCallParamsSchema = z.object({
-  name: z.string(),
-  arguments: z.unknown().optional(),
-});
 const SearchTicketsArgsSchema = z.object({
-  query: z.string().max(500).default(''),
-  limit: z.number().int().min(1).max(50).default(10),
-  page: z.number().int().min(1).default(1),
-  status: z.enum(['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing']).optional(),
-  component: z.string().max(100).optional(),
-  milestone: z.string().max(100).optional(),
-  resolution: z.string().max(100).optional(),
+  query: z
+    .string()
+    .max(500)
+    .default('')
+    .describe(
+      'Plain keywords (summary-only substring match), a ticket number such as 12345 or #12345, or filter expressions joined by &. Fields: summary, description, owner, reporter, type, status, priority, milestone, component, version, severity, resolution, keywords, cc, focuses. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values, using the same operator each time: status=new&status=assigned. Sort with order=<column> (any field above, plus time and changetime) and desc=1. Example: owner=audrasjb&keywords~=has-patch&status!=closed&order=changetime&desc=1. An expression on a field this instance does not configure is rejected rather than silently ignored.'
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .default(10)
+    .describe('Maximum number of results to return (default: 10, max: 50)'),
+  page: z.number().int().min(1).default(1).describe('One-based results page (default: 1)'),
+  status: z
+    .enum(['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing'])
+    .optional()
+    .describe(
+      'Exact-match convenience for one status. It overrides status in query; use status=... in query for OR or negation.'
+    ),
+  component: z
+    .string()
+    .max(100)
+    .optional()
+    .describe(
+      "Exact-match convenience for one component name (e.g., 'Administration', 'Posts, Post Types'). It overrides component in query; use component~=... in query for a substring match. Call getTracInfo with type components for the names this instance uses."
+    ),
+  milestone: z
+    .string()
+    .max(100)
+    .optional()
+    .describe(
+      "Exact-match convenience for one milestone (e.g., '6.9'). It overrides milestone in query. Call getTracInfo with type milestones for the names this instance uses."
+    ),
+  resolution: z
+    .string()
+    .max(100)
+    .optional()
+    .describe(
+      "Exact-match convenience for one resolution (e.g., 'fixed', 'wontfix', 'duplicate'). It overrides resolution in query."
+    ),
 });
 // The whole ticket RSS is fetched before slicing, so the cap only bounds response size.
 const TICKET_COMMENT_LIMIT_MAX = 500;
 const GetTicketArgsSchema = z.object({
-  id: z.number().int().positive(),
-  includeComments: z.boolean().default(true),
-  commentLimit: z.number().int().min(0).max(TICKET_COMMENT_LIMIT_MAX).default(10),
+  id: z.number().int().positive().describe('Trac ticket ID number'),
+  includeComments: z
+    .boolean()
+    .default(true)
+    .describe('Include ticket comments and discussion (default: true)'),
+  commentLimit: z
+    .number()
+    .int()
+    .min(0)
+    .max(TICKET_COMMENT_LIMIT_MAX)
+    .default(10)
+    .describe(
+      'Maximum number of comments to return, newest first from the end of the discussion (default: 10, max: 500). Compare returnedComments with totalComments to see whether older comments were left out.'
+    ),
 });
 const GetChangesetArgsSchema = z.object({
-  revision: z.number().int().positive(),
-  includeDiff: z.boolean().default(true),
-  diffLimit: z.number().int().min(0).max(10000).default(2000),
+  revision: z.number().int().positive().describe('SVN revision number (e.g., 58504)'),
+  includeDiff: z.boolean().default(true).describe('Include diff content (default: true)'),
+  diffLimit: z
+    .number()
+    .int()
+    .min(0)
+    .max(10000)
+    .default(2000)
+    .describe('Maximum characters of diff to return (default: 2000, max: 10000)'),
 });
 // core.trac.wordpress.org clamps the timeline's daysback parameter at Trac's
 // default max_daysback of 90; wider requests silently lose the oldest events.
@@ -92,13 +137,36 @@ const TimelineAuthorSchema = z
   .max(50);
 export const GetTimelineArgsSchema = z
   .object({
-    days: z.number().int().min(1).max(30).optional(),
-    limit: z.number().int().min(1).max(100).default(20),
-    from: TimelineDateSchema.optional(),
-    to: TimelineDateSchema.optional(),
+    days: z
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .optional()
+      .describe(
+        'Number of inclusive calendar days ending today (UTC), defaults to 7 when neither from nor to is given. Cannot be combined with from or to. Calls that use only days and limit pass it to Trac as daysback unchanged, the original behavior, which also includes the day before the window.'
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(20)
+      .describe(
+        'Maximum number of events for calls that use only days and limit. For date-range or author-filtered calls, this is advisory: results are trimmed to whole days from the oldest end, and the newest complete day is returned in full even when it holds more events than limit.'
+      ),
+    from: TimelineDateSchema.optional().describe(
+      'Inclusive ISO-8601 start date (YYYY-MM-DD), not earlier than 2005-01-01. The from-to window may span at most 90 days per request; query adjacent ranges for longer periods.'
+    ),
+    to: TimelineDateSchema.optional().describe(
+      'Inclusive ISO-8601 end date (YYYY-MM-DD); the resolved window must not begin before 2005-01-01, and dates later than today (UTC) are rejected. Defaults to today when only from is given; to alone covers the 7 inclusive days ending at to.'
+    ),
     author: z
       .union([TimelineAuthorSchema, z.array(TimelineAuthorSchema).min(1).max(10)])
-      .optional(),
+      .optional()
+      .describe(
+        'Trac username, or list of up to 10 usernames, to filter events by author. Filtering happens on the server, so results stay complete even when the unfiltered window holds more events than limit.'
+      ),
   })
   // Only clock-independent rules belong here; the window itself is resolved and
   // validated against a single reading of the clock in resolveTimelineQuery.
@@ -124,13 +192,27 @@ export const GetTimelineArgsSchema = z
     }
   });
 const GetTracInfoArgsSchema = z.object({
-  type: z.enum(['components', 'milestones', 'priorities', 'severities', 'types', 'statuses']),
+  type: z
+    .enum(['components', 'milestones', 'priorities', 'severities', 'types', 'statuses'])
+    .describe('Type of Trac information to retrieve'),
 });
 const ChatGptSearchArgsSchema = z.object({
-  query: z.string().trim().min(1).max(500),
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .describe(
+      'Search query for WordPress Trac. Can be keywords, ticket numbers, revision numbers, or component names.'
+    ),
 });
 const ChatGptFetchArgsSchema = z.object({
-  id: z.string().regex(/^(?:r\d+|\d+)$/, 'Use a ticket number or an r-prefixed changeset'),
+  id: z
+    .string()
+    .regex(/^(?:r\d+|\d+)$/, 'Use a ticket number or an r-prefixed changeset')
+    .describe(
+      "The ID of the item to fetch detailed information for (e.g., '61234' for ticket, 'r58504' for changeset)."
+    ),
 });
 
 function normalizeEmptyRecord(value: unknown) {
@@ -163,17 +245,8 @@ const LinkedPullRequestSchema = z.object({
   html_url: z.string().url(),
 });
 
-class UnknownToolError extends Error {}
-// Argument checks that Zod cannot express, reported as JSON-RPC invalid params.
+// Argument checks that Zod cannot express, reported as invalid_argument tool errors.
 class InvalidToolArgumentsError extends Error {}
-
-function isInvalidArgumentsError(error: unknown): boolean {
-  return (
-    error instanceof UnknownToolError ||
-    error instanceof InvalidToolArgumentsError ||
-    error instanceof z.ZodError
-  );
-}
 
 // Stable, machine-readable tool error codes. These are API surface documented in the README:
 // consumers branch on them, so codes only change with a version bump. Messages can change freely.
@@ -1715,30 +1788,26 @@ async function fetchLegacyTimeline(instance: TracInstance, days: number, limit: 
   };
 }
 
-function jsonRpcResult(id: JsonRpcRequest['id'], result: unknown) {
-  return { jsonrpc: '2.0', id, result };
-}
-
-function jsonRpcError(id: JsonRpcRequest['id'], code: number, message: string) {
-  return { jsonrpc: '2.0', id, error: { code, message } };
-}
-
-function toolResult(id: JsonRpcRequest['id'], result: unknown, isError = false) {
-  return jsonRpcResult(id, {
-    content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    ...(isError ? { isError: true } : {}),
-  });
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error';
 }
 
-function toolErrorResult(id: JsonRpcRequest['id'], error: unknown) {
+function toolContent(result: unknown, isError = false) {
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function toolErrorContent(error: unknown) {
   const toolError =
-    error instanceof ToolError ? error : new ToolError('upstream_error', errorMessage(error));
-  return toolResult(
-    id,
+    error instanceof ToolError
+      ? error
+      : new ToolError(
+          error instanceof InvalidToolArgumentsError ? 'invalid_argument' : 'upstream_error',
+          errorMessage(error)
+        );
+  return toolContent(
     { code: toolError.code, error: toolError.message, ...toolError.details },
     true
   );
@@ -1828,273 +1897,49 @@ async function executeStandardTool(
     }
 
     default:
-      throw new UnknownToolError(`Unknown tool: ${name}`);
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 
-/**
- * Handle MCP JSON-RPC 2.0 requests
- */
-export async function handleMcpRequest(instance: TracInstance, request: JsonRpcRequest) {
-  const { method, params, id } = request;
-  if (id === undefined) {
-    return null;
-  }
+const SERVER_VERSION = '1.1.0';
 
-  switch (method) {
-    case 'initialize':
-      return jsonRpcResult(id, {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          tools: {},
-        },
-        serverInfo: {
-          name: tracDisplayName(instance),
-          version: '1.1.0',
-        },
-      });
+const STANDARD_TOOLS = [
+  {
+    name: 'searchTickets',
+    description:
+      'Search WordPress Trac tickets by keyword, ticket number, or filter expressions. Returns one page of ticket summaries (id, summary, owner, type, status, priority, milestone, component) with totalFound, page, pageSize, and hasMore. Plain keywords match the ticket summary only; use description~=text to search ticket bodies. Field values differ by Trac instance, so call getTracInfo for the components, milestones, priorities, severities, types, and statuses this instance configures.',
+    inputSchema: SearchTicketsArgsSchema,
+  },
+  {
+    name: 'getTicket',
+    description:
+      'Get a WordPress Trac ticket: its fields, full description, human comments (newest commentLimit of them, with totalComments and returnedComments), attachments, changesets that reference it, and linked GitHub pull requests with their check and review state. Bot comments and cc or keyword-only changes are omitted from comments.',
+    inputSchema: GetTicketArgsSchema,
+  },
+  {
+    name: 'getChangeset',
+    description:
+      'Get information about a specific WordPress code changeset/commit including commit message, author, and diff.',
+    inputSchema: GetChangesetArgsSchema,
+  },
+  {
+    name: 'getTimeline',
+    description:
+      'Get activity from the WordPress Trac timeline including tickets, commits, and other events. Calls that use only days and limit keep the original recent-activity response. Date-range or author-filtered calls report coverage in whole UTC days. When complete is false, use continueWith when present to walk further back. Supports historical dates from 2005-01-01, date ranges of at most 90 days per request, and server-side author filtering.',
+    inputSchema: GetTimelineArgsSchema,
+  },
+  {
+    name: 'getTracInfo',
+    description:
+      'Get WordPress Trac components, milestones, priorities, severities, ticket types, or statuses.',
+    inputSchema: GetTracInfoArgsSchema,
+  },
+];
 
-    case 'tools/list':
-      return {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          tools: [
-            {
-              name: 'searchTickets',
-              description:
-                'Search WordPress Trac tickets by keyword, ticket number, or filter expressions. Returns one page of ticket summaries (id, summary, owner, type, status, priority, milestone, component) with totalFound, page, pageSize, and hasMore. Plain keywords match the ticket summary only; use description~=text to search ticket bodies. Field values differ by Trac instance, so call getTracInfo for the components, milestones, priorities, severities, types, and statuses this instance configures.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  query: {
-                    type: 'string',
-                    description:
-                      'Plain keywords (summary-only substring match), a ticket number such as 12345 or #12345, or filter expressions joined by &. Fields: summary, description, owner, reporter, type, status, priority, milestone, component, version, severity, resolution, keywords, cc, focuses. Operators: = exact, ~= contains, != not equal, !~= does not contain. Repeat a field to OR its values, using the same operator each time: status=new&status=assigned. Sort with order=<column> (any field above, plus time and changetime) and desc=1. Example: owner=audrasjb&keywords~=has-patch&status!=closed&order=changetime&desc=1. An expression on a field this instance does not configure is rejected rather than silently ignored.',
-                  },
-                  limit: {
-                    type: 'number',
-                    description: 'Maximum number of results to return (default: 10, max: 50)',
-                    default: 10,
-                  },
-                  page: {
-                    type: 'number',
-                    description: 'One-based results page (default: 1)',
-                    default: 1,
-                  },
-                  status: {
-                    type: 'string',
-                    enum: ['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing'],
-                    description:
-                      'Exact-match convenience for one status. It overrides status in query; use status=... in query for OR or negation.',
-                  },
-                  component: {
-                    type: 'string',
-                    description:
-                      "Exact-match convenience for one component name (e.g., 'Administration', 'Posts, Post Types'). It overrides component in query; use component~=... in query for a substring match. Call getTracInfo with type components for the names this instance uses.",
-                  },
-                  milestone: {
-                    type: 'string',
-                    description:
-                      "Exact-match convenience for one milestone (e.g., '6.9'). It overrides milestone in query. Call getTracInfo with type milestones for the names this instance uses.",
-                  },
-                  resolution: {
-                    type: 'string',
-                    description:
-                      "Exact-match convenience for one resolution (e.g., 'fixed', 'wontfix', 'duplicate'). It overrides resolution in query.",
-                  },
-                },
-              },
-            },
-            {
-              name: 'getTicket',
-              description:
-                'Get a WordPress Trac ticket: its fields, full description, human comments (newest commentLimit of them, with totalComments and returnedComments), attachments, changesets that reference it, and linked GitHub pull requests with their check and review state. Bot comments and cc or keyword-only changes are omitted from comments.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  id: {
-                    type: 'number',
-                    description: 'Trac ticket ID number',
-                  },
-                  includeComments: {
-                    type: 'boolean',
-                    description: 'Include ticket comments and discussion (default: true)',
-                    default: true,
-                  },
-                  commentLimit: {
-                    type: 'integer',
-                    description:
-                      'Maximum number of comments to return, newest first from the end of the discussion (default: 10, max: 500). Compare returnedComments with totalComments to see whether older comments were left out.',
-                    default: 10,
-                    minimum: 0,
-                    maximum: 500,
-                  },
-                },
-                required: ['id'],
-              },
-            },
-            {
-              name: 'getChangeset',
-              description:
-                'Get information about a specific WordPress code changeset/commit including commit message, author, and diff.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  revision: {
-                    type: 'number',
-                    description: 'SVN revision number (e.g., 58504)',
-                  },
-                  includeDiff: {
-                    type: 'boolean',
-                    description: 'Include diff content (default: true)',
-                    default: true,
-                  },
-                  diffLimit: {
-                    type: 'number',
-                    description: 'Maximum characters of diff to return (default: 2000, max: 10000)',
-                    default: 2000,
-                  },
-                },
-                required: ['revision'],
-              },
-            },
-            {
-              name: 'getTimeline',
-              description:
-                'Get activity from the WordPress Trac timeline including tickets, commits, and other events. Calls that use only days and limit keep the original recent-activity response. Date-range or author-filtered calls report coverage in whole UTC days. When complete is false, use continueWith when present to walk further back. Supports historical dates from 2005-01-01, date ranges of at most 90 days per request, and server-side author filtering.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  days: {
-                    type: 'integer',
-                    description:
-                      'Number of inclusive calendar days ending today (UTC), defaults to 7 when neither from nor to is given. Cannot be combined with from or to. Calls that use only days and limit pass it to Trac as daysback unchanged, the original behavior, which also includes the day before the window.',
-                    minimum: 1,
-                    maximum: 30,
-                  },
-                  from: {
-                    type: 'string',
-                    pattern: TIMELINE_DATE_PATTERN,
-                    description:
-                      'Inclusive ISO-8601 start date (YYYY-MM-DD), not earlier than 2005-01-01. The from-to window may span at most 90 days per request; query adjacent ranges for longer periods.',
-                  },
-                  to: {
-                    type: 'string',
-                    pattern: TIMELINE_DATE_PATTERN,
-                    description:
-                      'Inclusive ISO-8601 end date (YYYY-MM-DD); the resolved window must not begin before 2005-01-01, and dates later than today (UTC) are rejected. Defaults to today when only from is given; to alone covers the 7 inclusive days ending at to.',
-                  },
-                  author: {
-                    description:
-                      'Trac username, or list of up to 10 usernames, to filter events by author. Filtering happens on the server, so results stay complete even when the unfiltered window holds more events than limit.',
-                    anyOf: [
-                      { type: 'string', pattern: TIMELINE_AUTHOR_PATTERN, maxLength: 50 },
-                      {
-                        type: 'array',
-                        items: { type: 'string', pattern: TIMELINE_AUTHOR_PATTERN, maxLength: 50 },
-                        minItems: 1,
-                        maxItems: 10,
-                      },
-                    ],
-                  },
-                  limit: {
-                    type: 'integer',
-                    description:
-                      'Maximum number of events for calls that use only days and limit. For date-range or author-filtered calls, this is advisory: results are trimmed to whole days from the oldest end, and the newest complete day is returned in full even when it holds more events than limit.',
-                    default: 20,
-                    minimum: 1,
-                    maximum: 100,
-                  },
-                },
-              },
-            },
-            {
-              name: 'getTracInfo',
-              description:
-                'Get WordPress Trac components, milestones, priorities, severities, ticket types, or statuses.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  type: {
-                    type: 'string',
-                    enum: [
-                      'components',
-                      'milestones',
-                      'priorities',
-                      'severities',
-                      'types',
-                      'statuses',
-                    ],
-                    description: 'Type of Trac information to retrieve',
-                  },
-                },
-                required: ['type'],
-              },
-            },
-          ],
-        },
-      };
-
-    case 'ping':
-      return jsonRpcResult(id, {});
-
-    case 'tools/call': {
-      const parsed = ToolCallParamsSchema.safeParse(params);
-      if (!parsed.success) {
-        return jsonRpcError(id, -32602, 'Invalid tools/call parameters');
-      }
-
-      try {
-        return toolResult(
-          id,
-          await executeStandardTool(instance, parsed.data.name, parsed.data.arguments)
-        );
-      } catch (error) {
-        if (isInvalidArgumentsError(error)) {
-          return jsonRpcError(id, -32602, errorMessage(error));
-        }
-        return toolErrorResult(id, error);
-      }
-    }
-
-    default:
-      return jsonRpcError(id, -32601, `Method not found: ${method}`);
-  }
-}
-
-/**
- * Handle ChatGPT-specific MCP JSON-RPC 2.0 requests
- * Provides the search and fetch compatibility tools.
- */
-export async function handleChatGPTMcpRequest(instance: TracInstance, request: JsonRpcRequest) {
-  const { method, params, id } = request;
-  if (id === undefined) {
-    return null;
-  }
-
-  switch (method) {
-    case 'initialize':
-      return jsonRpcResult(id, {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          tools: {},
-        },
-        serverInfo: {
-          name: tracDisplayName(instance),
-          version: '1.1.0',
-        },
-      });
-
-    case 'tools/list':
-      return {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          tools: [
-            {
-              name: 'search',
-              description: `Search WordPress Trac for tickets, changesets, and timeline activity.
+const CHATGPT_TOOLS = [
+  {
+    name: 'search',
+    description: `Search WordPress Trac for tickets, changesets, and timeline activity.
 
 Query Types:
 - Ticket searches: Use keywords like "block editor", "media upload", "REST API" to find related tickets
@@ -2102,63 +1947,42 @@ Query Types:
 - Changesets: Use r-prefixed revision numbers like "r58504" to find code changes
 - Recent activity: Use terms like "recent", "timeline", "latest" to see recent Trac activity
 - Components: Search by component like "REST API", "Block Editor", "Media" to find tickets in that area`,
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  query: {
-                    type: 'string',
-                    description:
-                      'Search query for WordPress Trac. Can be keywords, ticket numbers, revision numbers, or component names.',
-                  },
-                },
-                required: ['query'],
-              },
-            },
-            {
-              name: 'fetch',
-              description:
-                'Retrieve detailed information about a specific WordPress Trac item by its ID.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  id: {
-                    type: 'string',
-                    description:
-                      "The ID of the item to fetch detailed information for (e.g., '61234' for ticket, 'r58504' for changeset).",
-                  },
-                },
-                required: ['id'],
-              },
-            },
-          ],
-        },
-      };
+    inputSchema: ChatGptSearchArgsSchema,
+  },
+  {
+    name: 'fetch',
+    description: 'Retrieve detailed information about a specific WordPress Trac item by its ID.',
+    inputSchema: ChatGptFetchArgsSchema,
+  },
+];
 
-    case 'ping':
-      return jsonRpcResult(id, {});
-
-    case 'tools/call': {
-      const parsed = ToolCallParamsSchema.safeParse(params);
-      if (!parsed.success) {
-        return jsonRpcError(id, -32602, 'Invalid tools/call parameters');
-      }
-
-      try {
-        return toolResult(
-          id,
-          await executeChatGptTool(instance, parsed.data.name, parsed.data.arguments)
-        );
-      } catch (error) {
-        if (isInvalidArgumentsError(error)) {
-          return jsonRpcError(id, -32602, errorMessage(error));
+/**
+ * Build the MCP server for one request, bound to the Trac instance its route names.
+ *
+ * @param route The resolved MCP route.
+ * @return A server exposing the standard tools, or the ChatGPT search and fetch pair.
+ */
+function createTracServer({ instance, chatGpt }: McpRoute): McpServer {
+  const server = new McpServer({ name: tracDisplayName(instance), version: SERVER_VERSION });
+  const execute = chatGpt ? executeChatGptTool : executeStandardTool;
+  for (const tool of chatGpt ? CHATGPT_TOOLS : STANDARD_TOOLS) {
+    server.registerTool(
+      tool.name,
+      {
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        annotations: { readOnlyHint: true, openWorldHint: true },
+      },
+      async (args: unknown) => {
+        try {
+          return toolContent(await execute(instance, tool.name, args));
+        } catch (error) {
+          return toolErrorContent(error);
         }
-        return toolErrorResult(id, error);
       }
-    }
-
-    default:
-      return jsonRpcError(id, -32601, `Method not found: ${method}`);
+    );
   }
+  return server;
 }
 
 async function searchTicketsForChatGPT(instance: TracInstance, query: string, limit: number) {
@@ -2259,7 +2083,7 @@ async function executeChatGptTool(
         : getTicketForChatGPT(instance, Number.parseInt(id, 10), true);
     }
     default:
-      throw new UnknownToolError(`Unknown tool: ${name}`);
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 
@@ -2558,37 +2382,6 @@ const MCP_CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name',
 };
 
-const HANDSHAKE_PROTOCOL_VERSIONS = new Set([
-  '2024-11-05',
-  '2025-03-26',
-  '2025-06-18',
-  '2025-11-25',
-]);
-
-/**
- * Find a protocol version this server cannot serve without the initialize handshake.
- *
- * @param request Incoming HTTP request.
- * @param rpc Parsed JSON-RPC request.
- * @return The unsupported version, or null when the request can be served.
- */
-function unsupportedProtocolVersion(request: Request, rpc: JsonRpcRequest): string | null {
-  if (rpc.method === 'initialize') {
-    return null;
-  }
-  const { _meta: meta } = rpc.params ?? {};
-  const bodyVersion =
-    meta && typeof meta === 'object'
-      ? (meta as Record<string, unknown>)['io.modelcontextprotocol/protocolVersion']
-      : undefined;
-  for (const version of [request.headers.get('MCP-Protocol-Version'), bodyVersion]) {
-    if (version != null && !HANDSHAKE_PROTOCOL_VERSIONS.has(String(version))) {
-      return String(version);
-    }
-  }
-  return null;
-}
-
 type McpRoute = {
   instance: TracInstance;
   chatGpt: boolean;
@@ -2622,6 +2415,43 @@ export function matchMcpRoute(pathname: string): McpRoute | null {
   return instance ? { instance, chatGpt: segments.length === 4 } : null;
 }
 
+const modernMcpHandler = createMcpHandler(
+  ({ requestInfo }) => {
+    const route = requestInfo && matchMcpRoute(new URL(requestInfo.url).pathname);
+    if (!route) {
+      throw new Error('MCP request reached the handler without a route');
+    }
+    return createTracServer(route);
+  },
+  { legacy: 'reject' }
+);
+
+/**
+ * Serve one handshake-era request statelessly, answering with plain JSON rather than SSE.
+ *
+ * @param route The resolved MCP route.
+ * @param request The normalized HTTP request.
+ * @param body The already-parsed JSON-RPC body.
+ * @return The transport's response.
+ */
+async function serveLegacyMcpRequest(
+  route: McpRoute,
+  request: Request,
+  body: unknown
+): Promise<Response> {
+  const server = createTracServer(route);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
+  await server.connect(transport);
+  try {
+    return await transport.handleRequest(request, { parsedBody: body });
+  } finally {
+    await server.close();
+  }
+}
+
 async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: MCP_CORS_HEADERS });
@@ -2637,44 +2467,33 @@ async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<
   try {
     body = await request.json();
   } catch {
-    return new Response(JSON.stringify(jsonRpcError(undefined, -32700, 'Parse error')), {
-      status: 400,
-      headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
-    });
-  }
-
-  const parsed = JsonRpcRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    return new Response(JSON.stringify(jsonRpcError(undefined, -32600, 'Invalid Request')), {
-      status: 400,
-      headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
-    });
-  }
-
-  // A generic error, not UnsupportedProtocolVersionError, is what tells a dual-era client to fall back to initialize.
-  const unsupported = unsupportedProtocolVersion(request, parsed.data);
-  if (unsupported) {
     return new Response(
-      JSON.stringify(
-        jsonRpcError(
-          parsed.data.id,
-          -32600,
-          `Unsupported protocol version ${unsupported}. This server speaks 2024-11-05 through the initialize handshake.`
-        )
-      ),
+      JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } }),
       { status: 400, headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' } }
     );
   }
 
-  const response = route.chatGpt
-    ? await handleChatGPTMcpRequest(route.instance, parsed.data)
-    : await handleMcpRequest(route.instance, parsed.data);
-  if (response === null) {
-    return new Response(null, { status: 202, headers: MCP_CORS_HEADERS });
+  // Clients were served before without these headers, which the SDK transport requires.
+  const headers = new Headers(request.headers);
+  headers.set('Content-Type', 'application/json');
+  const accept = headers.get('Accept') ?? '';
+  if (!accept.includes('application/json') || !accept.includes('text/event-stream')) {
+    headers.set('Accept', 'application/json, text/event-stream');
   }
+  const normalized = new Request(request.url, { method: 'POST', headers });
 
-  return new Response(JSON.stringify(response), {
-    headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
+  const response = (await isLegacyRequest(normalized, body))
+    ? await serveLegacyMcpRequest(route, normalized, body)
+    : await modernMcpHandler.fetch(normalized, { parsedBody: body });
+
+  const responseHeaders = new Headers(response.headers);
+  for (const [name, value] of Object.entries(MCP_CORS_HEADERS)) {
+    responseHeaders.set(name, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
   });
 }
 

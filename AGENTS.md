@@ -24,7 +24,7 @@ Green CI does not mean the feature works: every automated test mocks Trac. Follo
 
 ## Change safely
 
-- Keep advertised JSON schemas and Zod runtime schemas aligned.
+- Describe tool arguments with `.describe()` on their Zod schemas. The MCP SDK generates the advertised JSON schema from them, so there is no second declaration to keep aligned.
 - Add or update tests for parser, protocol, routing, and pagination behavior.
 - Treat Trac responses as untrusted input.
 - Keep upstream requests on `*.trac.wordpress.org` and the official linked-PR endpoint at `api.wordpress.org/dotorg/trac/pr/`.

@@ -171,8 +171,9 @@ Codes are stable API surface: branch on `code`, never on `error` wording. An exi
 its meaning and is only removed or renamed with a major version bump, while messages can change
 freely. New codes may be added over time, so treat an unrecognized code as `upstream_error`.
 
-Arguments that fail schema validation are rejected earlier with a JSON-RPC `-32602` invalid-params
-error and do not produce a tool error result.
+Arguments that fail the advertised input schema also return `isError: true`, but as the MCP SDK's
+plain-text message beginning `Input validation error:` rather than a JSON payload, so a model can
+read it and retry. An unknown tool name is a JSON-RPC `-32602` error.
 
 ## Connect
 
@@ -242,6 +243,9 @@ pnpm run deploy:production
 ## Design and safety
 
 - The server is read-only and has no Trac credentials.
+- The MCP protocol layer is the official TypeScript SDK. Each endpoint serves stateless 2026-07-28
+  clients and handshake-era clients (2024-11-05 through 2025-11-25), answering the latter with plain
+  JSON. The advertised input schemas are generated from the same Zod schemas that validate calls.
 - Tool inputs receive runtime validation before any upstream request.
 - Upstream requests stay on `*.trac.wordpress.org` and the official linked-PR endpoint on
   `api.wordpress.org`. The instance slug comes from the URL path, is validated against a strict

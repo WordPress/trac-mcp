@@ -61,6 +61,47 @@ function mcpRequest(body: unknown, path = '/mcp') {
   );
 }
 
+const INITIALIZE_PARAMS = {
+  protocolVersion: '2025-06-18',
+  capabilities: {},
+  clientInfo: { name: 'test', version: '1' },
+};
+
+function modernRequest(path: string, method: string) {
+  return worker.fetch(
+    new Request(`https://example.com${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': '2026-07-28',
+        'Mcp-Method': method,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method,
+        params: {
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1' },
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      }),
+    }),
+    {},
+    context
+  );
+}
+
+async function invalidArgumentsText(response: Response): Promise<string> {
+  const body = (await response.json()) as RpcBody;
+  expect(body.error).toBeUndefined();
+  expect(body.result.isError).toBe(true);
+  return body.result.content.at(0)?.text ?? '';
+}
+
 async function callTimeline(args: Record<string, unknown>, path = '/mcp'): Promise<TimelineResult> {
   const response = await mcpRequest(
     {
@@ -433,73 +474,63 @@ describe('MCP transport', () => {
     expect(((await invalid.json()) as RpcBody).error.code).toBe(-32600);
   });
 
-  it.each([
-    ['a modern header', { 'MCP-Protocol-Version': '2026-07-28' }, undefined, '/mcp', '2026-07-28'],
-    [
-      'a modern body version',
-      {},
-      { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
-      '/mcp',
-      '2026-07-28',
-    ],
-    [
-      'an unknown header',
-      { 'MCP-Protocol-Version': '1900-01-01' },
-      undefined,
-      '/mcp/meta/chatgpt',
-      '1900-01-01',
-    ],
-    [
-      'a modern body version alongside a supported header',
-      { 'MCP-Protocol-Version': '2025-06-18' },
-      { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
-      '/mcp',
-      '2026-07-28',
-    ],
-  ])(
-    'rejects %s so dual-era clients fall back to initialize',
-    async (_, headers, meta, path, expectedVersion) => {
-      const fetchMock = vi.fn<typeof fetch>();
-      vi.stubGlobal('fetch', fetchMock);
+  it('serves a stateless 2026-07-28 client without a handshake', async () => {
+    const response = await modernRequest('/mcp/meta/chatgpt', 'tools/list');
+    const body = (await response.json()) as { result: { tools: Array<{ name: string }> } };
 
-      const response = await worker.fetch(
-        new Request(`https://example.com${path}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 7,
-            method: 'tools/list',
-            params: meta ? { _meta: meta } : {},
-          }),
+    expect(response.status).toBe(200);
+    expect(body.result.tools.map((tool) => tool.name)).toEqual(['search', 'fetch']);
+  });
+
+  it('names its supported versions when a client asks for one it does not speak', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.com/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'MCP-Protocol-Version': '2099-01-01',
+          'Mcp-Method': 'tools/list',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/list',
+          params: {
+            _meta: {
+              'io.modelcontextprotocol/protocolVersion': '2099-01-01',
+              'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1' },
+              'io.modelcontextprotocol/clientCapabilities': {},
+            },
+          },
         }),
-        {},
-        context
-      );
-      const body = (await response.json()) as {
-        id: number;
-        error: { code: number; message: string };
-      };
+      }),
+      {},
+      context
+    );
+    const body = (await response.json()) as {
+      error: { code: number; data: { supported: string[] } };
+    };
 
-      expect(response.status).toBe(400);
-      expect(body.id).toBe(7);
-      expect(body.error.code).toBe(-32600);
-      expect(body.error.message).toContain(expectedVersion);
-      expect(body.error.message).toContain('2024-11-05');
-      expect(fetchMock).not.toHaveBeenCalled();
-    }
-  );
+    expect(response.status).toBe(400);
+    expect(body.error.code).toBe(-32022);
+    expect(body.error.data.supported).toContain('2026-07-28');
+  });
 
   it.each([
     ['tools/list', '2024-11-05'],
     ['tools/list', '2025-06-18'],
-    ['initialize', '2026-07-28'],
+    ['initialize', '2025-06-18'],
   ])('serves %s with protocol version header %s', async (method, version) => {
     const response = await worker.fetch(
       new Request('https://example.com/mcp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'MCP-Protocol-Version': version },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: {} }),
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method,
+          params: method === 'initialize' ? INITIALIZE_PARAMS : {},
+        }),
       }),
       {},
       context
@@ -522,9 +553,7 @@ describe('MCP transport', () => {
         arguments: { days: '1&max=999999', limit: -2 },
       },
     });
-    const body = (await response.json()) as RpcBody;
-
-    expect(body.error.code).toBe(-32602);
+    expect(await invalidArgumentsText(response)).toContain('Input validation error');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -567,18 +596,16 @@ describe('MCP transport', () => {
         params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 500 } },
       })
     ).json()) as RpcBody;
-    const rejected = (await (
-      await mcpRequest({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 501 } },
-      })
-    ).json()) as RpcBody;
+    const rejected = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'getTicket', arguments: { id: 10931, commentLimit: 501 } },
+    });
 
     expect(accepted.error).toBeUndefined();
     expect(accepted.result.isError).toBe(true);
-    expect(rejected.error.code).toBe(-32602);
+    expect(await invalidArgumentsText(rejected)).toContain('commentLimit');
   });
 
   it.each([7, 1])(
@@ -1014,11 +1041,10 @@ describe('MCP transport', () => {
       method: 'tools/call',
       params: { name: 'getTimeline', arguments: args },
     });
-    const body = (await response.json()) as RpcBody & { error: { message: string } };
+    const text = await invalidArgumentsText(response);
 
-    expect(body.error.code).toBe(-32602);
     if (message !== undefined) {
-      expect(body.error.message).toContain(message);
+      expect(text).toContain(message);
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -1381,9 +1407,7 @@ describe('MCP transport', () => {
       },
       '/mcp/chatgpt'
     );
-    const body = (await response.json()) as RpcBody;
-
-    expect(body.error.code).toBe(-32602);
+    expect(await invalidArgumentsText(response)).toContain('Input validation error');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -1760,13 +1784,16 @@ describe('Trac instance routing', () => {
 
   it('serves core under its own name at both slugless endpoints', async () => {
     for (const path of ['/mcp', '/mcp/chatgpt']) {
-      const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, path);
+      const response = await mcpRequest(
+        { jsonrpc: '2.0', id: 1, method: 'initialize', params: INITIALIZE_PARAMS },
+        path
+      );
 
-      expect(await response.json()).toEqual({
+      expect(await response.json()).toMatchObject({
         jsonrpc: '2.0',
         id: 1,
         result: {
-          protocolVersion: '2024-11-05',
+          protocolVersion: '2025-06-18',
           capabilities: { tools: {} },
           serverInfo: { name: 'WordPress Trac', version: '1.1.0' },
         },
@@ -1804,7 +1831,10 @@ describe('Trac instance routing', () => {
   });
 
   it('names a non-core instance after its Trac', async () => {
-    const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, '/mcp/meta');
+    const response = await mcpRequest(
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: INITIALIZE_PARAMS },
+      '/mcp/meta'
+    );
     const body = (await response.json()) as { result: { serverInfo: { name: string } } };
 
     expect(body.result.serverInfo.name).toBe('Making WordPress.org Trac');

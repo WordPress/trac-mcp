@@ -25,7 +25,7 @@ Start the Worker by following [local-development.md](local-development.md), then
 
 1. Confirm `/health` returns `200 OK` and `/` renders the landing page.
 2. Send `OPTIONS /mcp`; expect `204` and CORS headers.
-3. Initialize `/mcp`, send `ping`, and list tools. Then list tools with `MCP-Protocol-Version: 2026-07-28` and expect `400` with code `-32600`.
+3. Initialize `/mcp`, send `ping`, and list tools. Then run `mcp-explorer doctor` against `/mcp` and expect both the stateless 2026-07-28 mode and the legacy mode to report ok.
 4. Exercise each standard tool:
    - Search a keyword and a structured filter.
    - Read ticket `65739` with and without comments.
@@ -41,7 +41,7 @@ Start the Worker by following [local-development.md](local-development.md), then
    - List components and milestones.
 5. Check search page 1 and a page beyond the final result; the latter should return an empty page.
 6. Initialize `/mcp/chatgpt`, then search a keyword, ticket `65739`, and changeset `r58504`.
-7. Send invalid arguments and confirm the response is a JSON-RPC invalid-params error.
+7. Send invalid arguments and confirm each returns a tool result with `isError: true` that names the failing field, before any upstream request. An unknown method or tool is a JSON-RPC error.
 8. Request ticket `99999999` and changeset `99999999`; confirm each returns a tool error whose payload carries `"code": "not_found"` with the resource and ID named. Search with an unsupported filter field and confirm `"code": "invalid_argument"`.
 9. Exercise a non-Core instance at `/mcp/meta` and `/mcp/meta/chatgpt`. Every URL in a result must point at `meta.trac.wordpress.org`; a `core.trac.wordpress.org` URL means the instance was not threaded through.
 10. Ask an instance for a field it does not configure, such as severities on `/mcp/meta`. Expect an "are not available" answer rather than a tool error, and confirm Core still returns its populated list.

@@ -32,6 +32,7 @@
   "author": "James LePage",
   "license": "GPL-2.0-or-later",
   "dependencies": {
+    "@modelcontextprotocol/server": "2.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
