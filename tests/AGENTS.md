@@ -21,7 +21,7 @@ Put unit tests beside the code they cover, as `src/*.test.ts`. Vitest discovers 
 
 - Mock Trac responses. A test that reaches `core.trac.wordpress.org` fails on a network blip or when someone edits a ticket, and that failure says nothing about our code.
 - Cover parser, protocol, routing, and pagination behavior. Those are where regressions land.
-- When you change a tool's arguments, assert on both the advertised JSON schema and the Zod runtime schema. They are separate declarations and drift silently, and the drift is invisible until a client sends a request.
+- When you change a tool's arguments, assert on the advertised schema from `tools/list` as well as on runtime validation. The SDK generates one from the other, but a `.describe()` left off or a refinement the JSON schema cannot express still reaches clients.
 - Treat every Trac response in a fixture as untrusted input, the same as production code does.
 - Never put private ticket data or credentials in a fixture.
 

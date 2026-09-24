@@ -61,16 +61,16 @@ rpc /mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 
 Expect `serverInfo` naming the server, `"result":{}` for the ping, and all five tools advertised: `searchTickets`, `getTicket`, `getChangeset`, `getTimeline`, `getTracInfo`.
 
-The server currently answers with `"protocolVersion":"2024-11-05"` even though the request above advertises `2025-06-18`. That is the server pinning the version it implements, not a failure.
+The server negotiates the handshake version the client asks for, here `2025-06-18`, up to `2025-11-25`.
 
-A client on the stateless 2026-07-28 revision gets an honest refusal instead of a 2024-11-05 answer it cannot parse:
+Clients on the stateless 2026-07-28 revision skip the handshake. [`mcp-explorer`](https://github.com/simonw/mcp-explorer) exercises both eras in one run:
 
 ```bash
-curl -s -w '\n%{http_code}\n' -X POST "$BASE/mcp" -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+uvx mcp-explorer doctor "$BASE/mcp"
+uvx mcp-explorer doctor "$BASE/mcp/meta/chatgpt"
 ```
 
-Expect `400` with error code `-32600` and a message naming 2024-11-05. The code is deliberately not the modern `-32022`: a plain error is what tells a client that speaks both revisions to fall back to `initialize`. `uvx mcp-explorer doctor "$BASE/mcp"` should report the stateless mode with that message and the legacy mode as ok.
+Expect `Result: healthy`, with the stateless mode reporting protocol version `2026-07-28` and the legacy mode reporting `2025-11-25`, and 5 tools on `/mcp` and 2 on the ChatGPT endpoint.
 
 ## 3. Tools
 
@@ -191,7 +191,7 @@ call /mcp getTimeline '{"from":"2004-12-31","to":"2005-01-01"}'
 call /mcp getTracInfo '{}'
 ```
 
-Every one of these returns a JSON-RPC error rather than a success envelope or a crash. Bad arguments come back as `-32602` invalid params with the failing field named. A malformed request that returns `200` with empty content is a bug.
+None of these reaches Trac. The unknown method is a JSON-RPC `-32601` error and the unknown tool a `-32602` error. Every bad argument comes back as a tool result with `isError: true` that names the failing field: a schema violation as plain text beginning `Input validation error:`, and a check the schema cannot express, such as a future date, as JSON with `"code": "invalid_argument"`. A malformed request that returns a success envelope with empty content is a bug.
 
 All three `getTimeline` calls must fail in validation, before any upstream request: `days` cannot be combined with `from` or `to`, `to` cannot be a future date, and dates before `2005-01-01` are outside the verified WordPress Core Trac timeline. A future or too-early date that returns an empty success envelope instead of an error is a bug.
 
@@ -220,7 +220,7 @@ Each instance is a separate endpoint. These fixtures live on Meta rather than Co
 Confirm one non-Core instance end to end:
 
 ```bash
-rpc  /mcp/meta '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+rpc  /mcp/meta '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
 call /mcp/meta searchTickets '{"query":"plugin","limit":2}'
 call /mcp/meta getTicket '{"id":5483,"includeComments":true,"commentLimit":2}'
 call /mcp/meta getChangeset '{"revision":14000,"includeDiff":false}'

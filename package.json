@@ -1,6 +1,6 @@
 {
   "name": "wordpress-trac-mcp-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Read-only Model Context Protocol server for WordPress Trac",
   "type": "module",
   "main": "src/index.ts",
@@ -32,6 +32,7 @@
   "author": "James LePage",
   "license": "GPL-2.0-or-later",
   "dependencies": {
+    "@modelcontextprotocol/server": "2.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
