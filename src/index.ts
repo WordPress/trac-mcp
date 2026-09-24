@@ -2555,8 +2555,39 @@ interface Env {
 const MCP_CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, MCP-Protocol-Version',
+  'Access-Control-Allow-Headers': 'Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name',
 };
+
+const HANDSHAKE_PROTOCOL_VERSIONS = new Set([
+  '2024-11-05',
+  '2025-03-26',
+  '2025-06-18',
+  '2025-11-25',
+]);
+
+/**
+ * Find a protocol version this server cannot serve without the initialize handshake.
+ *
+ * @param request Incoming HTTP request.
+ * @param rpc Parsed JSON-RPC request.
+ * @return The unsupported version, or null when the request can be served.
+ */
+function unsupportedProtocolVersion(request: Request, rpc: JsonRpcRequest): string | null {
+  if (rpc.method === 'initialize') {
+    return null;
+  }
+  const { _meta: meta } = rpc.params ?? {};
+  const bodyVersion =
+    meta && typeof meta === 'object'
+      ? (meta as Record<string, unknown>)['io.modelcontextprotocol/protocolVersion']
+      : undefined;
+  for (const version of [request.headers.get('MCP-Protocol-Version'), bodyVersion]) {
+    if (version != null && !HANDSHAKE_PROTOCOL_VERSIONS.has(String(version))) {
+      return String(version);
+    }
+  }
+  return null;
+}
 
 type McpRoute = {
   instance: TracInstance;
@@ -2618,6 +2649,21 @@ async function handleMcpHttpRequest(route: McpRoute, request: Request): Promise<
       status: 400,
       headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' },
     });
+  }
+
+  // A generic error, not UnsupportedProtocolVersionError, is what tells a dual-era client to fall back to initialize.
+  const unsupported = unsupportedProtocolVersion(request, parsed.data);
+  if (unsupported) {
+    return new Response(
+      JSON.stringify(
+        jsonRpcError(
+          parsed.data.id,
+          -32600,
+          `Unsupported protocol version ${unsupported}. This server speaks 2024-11-05 through the initialize handshake.`
+        )
+      ),
+      { status: 400, headers: { ...MCP_CORS_HEADERS, 'Content-Type': 'application/json' } }
+    );
   }
 
   const response = route.chatGpt
