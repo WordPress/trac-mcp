@@ -250,7 +250,7 @@ call /mcp/themes getTracInfo '{"type":"components"}'
 call /mcp        getTracInfo '{"type":"severities"}'
 ```
 
-Meta has no severities and Themes has no components. Both return `Severities are not available in ...` / `Components are not available in ...` with `metadata.total` of `0`, and neither is a tool error. Core still returns the populated list, which is the control: an empty answer there means the query page markup changed and the parser broke.
+Meta has no severities and Themes has no components. Both return `Severities are not available in ...` / `Components are not available in ...` with `metadata.total` of `0`, and neither is a tool error. Core still returns all six severities in Trac's order (`blocker`, `critical`, `major`, `normal`, `minor`, `trivial`), which is the control: an empty answer there means the query page markup changed and the parser broke.
 
 Filtering on such a field is a tool error rather than an unavailable answer:
 

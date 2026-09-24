@@ -109,7 +109,7 @@ take four operators: `=` exact, `~=` contains, `!=` not equal, and `!~=` does no
 a field to OR its values (`status=new&status=assigned`), with the same operator each time. Add `order=<column>` and `desc=1` to
 sort, for example `component=Editor&status!=closed&order=changetime&desc=1`. Sortable columns are
 the fields above plus `time` and `changetime`. Field values differ by instance: `getTracInfo`
-lists the components, milestones, priorities, severities, types, and statuses each one configures.
+lists the complete components, milestones, priorities, severities, types, and statuses each one configures, in Trac's order. Milestones include open and closed groups as one flat list.
 
 It also accepts `status`, `component`, `milestone`, and `resolution` as separate arguments. Each
 is an exact match on one value and overrides the same field in `query`; the expression form is

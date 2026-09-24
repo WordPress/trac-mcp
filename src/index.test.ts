@@ -509,7 +509,7 @@ describe('MCP transport', () => {
       .fn<typeof fetch>()
       .mockResolvedValue(
         new Response(
-          '<form id="query"><select id="add_filter_0"><option value="type"></option></select><select name="0_type"><option>defect</option></select></form>'
+          '<form id="query"><select name="add_filter_0"><option value="type"></option></select><script>var properties={"type":{"options":["defect"]}};</script></form>'
         )
       );
     vi.stubGlobal('fetch', fetchMock);
@@ -2034,7 +2034,7 @@ describe('Trac instance routing', () => {
         .fn<typeof fetch>()
         .mockResolvedValue(
           new Response(
-            '<html><body><select name="add_filter_0"><option value="severity">Severity</option></select><select class="trac-filter" name="0_severity"><option value="blocker">blocker</option><option value="normal">normal</option></select></body></html>'
+            '<html><body><select name="add_filter_0"><option value="severity">Severity</option></select><script>var properties={"severity":{"options":["blocker","normal"],"type":"select"}};</script></body></html>'
           )
         )
     );
@@ -2318,14 +2318,20 @@ describe('Trac instance routing', () => {
     expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').totalFound).toBe(3);
   });
 
-  it('fails rather than reporting a configured field as unavailable', async () => {
+  it.each([
+    '',
+    'var properties={broken};',
+    'var properties={};',
+    'var properties={"component":{"options":[42]}};',
+    'var properties={"component":{"options":[],"optgroups":[{"options":"bad"}]}};',
+  ])('reports unparseable configured options as upstream_error: %s', async (script) => {
     vi.stubGlobal(
       'fetch',
       vi
         .fn<typeof fetch>()
         .mockResolvedValue(
           new Response(
-            '<html><select name="add_filter_0"><option value="component">Component</option></select><p>the option list moved</p></html>'
+            `<html><select name="add_filter_0"><option value="component">Component</option></select><script>${script}</script></html>`
           )
         )
     );
@@ -2340,16 +2346,17 @@ describe('Trac instance routing', () => {
 
     expect(body.result.isError).toBe(true);
     expect(body.result.content.at(0)?.text).toContain('Trac did not return component options');
+    expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').code).toBe('upstream_error');
   });
 
-  it('reads the option list whatever order Trac writes the select attributes in', async () => {
+  it('reads options whatever order Trac writes the picker attributes in', async () => {
     vi.stubGlobal(
       'fetch',
       vi
         .fn<typeof fetch>()
         .mockResolvedValue(
           new Response(
-            '<html><select id="filter" name="add_filter_0"><option value="component">Component</option></select><select class="trac-filter" id="c" name="0_component"><option value="Editor">Editor</option></select></html>'
+            '<html><select id="filter" name="add_filter_0"><option value="component">Component</option></select><script>var properties={"component":{"options":["Editor"],"type":"select"}};</script></html>'
           )
         )
     );
@@ -2365,6 +2372,70 @@ describe('Trac instance routing', () => {
     expect(body.result.isError).toBeUndefined();
     expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').metadata.data).toEqual(['Editor']);
   });
+
+  it.each([
+    [
+      'priorities',
+      'priority',
+      { type: 'select', options: ['highest omg bbq', 'high', 'normal', 'low', 'lowest'] },
+      ['highest omg bbq', 'high', 'normal', 'low', 'lowest'],
+    ],
+    [
+      'milestones',
+      'milestone',
+      {
+        options: ['Unscheduled'],
+        optgroups: [
+          { label: 'Open (by due date)', options: ['7.0'] },
+          { label: 'Open (no due date)', options: ['Future Release', 'Awaiting Review'] },
+          { label: 'Closed', options: ['6.9', '6.8'] },
+        ],
+      },
+      ['Unscheduled', '7.0', 'Future Release', 'Awaiting Review', '6.9', '6.8'],
+    ],
+    [
+      'statuses',
+      'status',
+      { type: 'radio', options: ['approved', 'closed', 'new', 'reopened', 'reviewing'] },
+      ['approved', 'closed', 'new', 'reopened', 'reviewing'],
+    ],
+    [
+      'types',
+      'type',
+      { type: 'select', options: ['defect (bug)', 'enhancement'] },
+      ['defect (bug)', 'enhancement'],
+    ],
+    [
+      'components',
+      'component',
+      { options: ['Text }; "quoted"', 'Back\\slash', 'A & B'] },
+      ['Text }; "quoted"', 'Back\\slash', 'A & B'],
+    ],
+  ])(
+    'reads complete %s in Trac order from one query page',
+    async (type, field, definition, expected) => {
+      const upstream = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          `<select name="add_filter_0"><option value="${field}">${field}</option></select>
+       <script>var properties = ${JSON.stringify({ [field]: definition }, null, 2)}; var other = {};</script>`
+        )
+      );
+      vi.stubGlobal('fetch', upstream);
+
+      const response = await mcpRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'getTracInfo', arguments: { type } },
+      });
+      const body = (await response.json()) as RpcBody;
+
+      expect(body.result.isError).toBeUndefined();
+      expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').metadata.data).toEqual(expected);
+      expect(upstream).toHaveBeenCalledTimes(1);
+      expect(upstream.mock.calls[0]?.[0]?.toString()).toBe('https://core.trac.wordpress.org/query');
+    }
+  );
 
   it('reports a redirect that stays on the instance as a redirect, not a missing instance', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -2433,10 +2504,16 @@ describe('Trac instance routing', () => {
     expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').returned).toBe(1);
   });
 
-  it('separates a field an instance lacks from one no ticket has a value for', async () => {
+  it('separates an unconfigured field from one with no options', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn<typeof fetch>().mockResolvedValue(new Response('id,milestone\n4,\n5,'))
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '<select name="add_filter_0"><option value="milestone">Milestone</option></select><script>var properties={"milestone":{"options":[]}};</script>'
+          )
+        )
     );
 
     const response = await mcpRequest(
