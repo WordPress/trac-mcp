@@ -2318,6 +2318,81 @@ describe('Trac instance routing', () => {
     expect(JSON.parse(body.result.content.at(0)?.text ?? '{}').totalFound).toBe(3);
   });
 
+  it('accepts a status value only the routed instance has', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n286473,A theme'))
+      .mockResolvedValueOnce(
+        new Response(
+          `<html><select name="add_filter_0"><option value="status">Status</option></select>
+           <script>var properties = ${JSON.stringify({ status: { options: ['approved', 'closed', 'new', 'reopened', 'reviewing'] } })};</script>
+           <span class="numrows">(1 match)</span></html>`
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'searchTickets', arguments: { status: 'approved' } },
+      },
+      '/mcp/themes'
+    );
+    const body = (await response.json()) as RpcBody;
+
+    expect(body.result.isError).toBeUndefined();
+    const requested = new URL(fetchMock.mock.calls[0]?.[0]?.toString() ?? '');
+    expect(requested.searchParams.get('status')).toBe('approved');
+  });
+
+  it('rejects a status value the routed instance does not have', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('id,summary\n50000,A ticket'))
+      .mockResolvedValueOnce(
+        new Response(
+          `<html><select name="add_filter_0"><option value="status">Status</option></select>
+           <script>var properties = ${JSON.stringify({ status: { options: ['accepted', 'assigned', 'closed', 'new', 'reopened', 'reviewing'] } })};</script>
+           <span class="numrows">(1 match)</span></html>`
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await mcpRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'searchTickets', arguments: { status: 'open' } },
+    });
+    const body = (await response.json()) as RpcBody;
+    const text = body.result.content.at(0)?.text ?? '';
+    const result = JSON.parse(text);
+
+    expect(body.result.isError).toBe(true);
+    expect(result.code).toBe('invalid_argument');
+    expect(text).toContain('accepted, assigned, closed, new, reopened, reviewing');
+    expect(result.results).toBeUndefined();
+  });
+
+  it('advertises status as a free-form string rather than a fixed enum', async () => {
+    const response = await mcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const body = (await response.json()) as {
+      result: {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties: { status?: { type?: string; enum?: unknown } } };
+        }>;
+      };
+    };
+    const status = body.result.tools.find((tool) => tool.name === 'searchTickets')?.inputSchema
+      .properties.status;
+
+    expect(status?.type).toBe('string');
+    expect(status?.enum).toBeUndefined();
+  });
+
   it.each([
     '',
     'var properties={broken};',
