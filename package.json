@@ -33,7 +33,7 @@
   "license": "GPL-2.0-or-later",
   "dependencies": {
     "@modelcontextprotocol/server": "2.1.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.8.3",
