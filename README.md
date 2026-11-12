@@ -22,6 +22,25 @@ The former staging deployment at `https://mcp-server-wporg-trac-staging.a8cai.wo
 deprecated and runs older code. Its `a8cai.workers.dev` subdomain differs from the active staging
 deployment's `a8c-aiops.workers.dev` subdomain.
 
+### Set a user agent
+
+Cloudflare runs a [Browser Integrity Check](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/)
+on every `workers.dev` hostname, and it cannot be turned off. It rejects some default client user
+agents, such as Python's `Python-urllib/3.x`, with HTTP 403 and Cloudflare error 1010. The request
+never reaches the server, and retrying does not help.
+
+Send a `User-Agent` header that names your client. It does not need to look like a browser:
+
+```python
+request = urllib.request.Request(url, data=body, headers={
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "User-Agent": "my-tool/1.0",
+})
+```
+
+The default user agents of `requests`, `httpx`, `aiohttp`, and curl already pass.
+
 ## Trac instances
 
 Each Trac instance has its own endpoint. `/mcp` and `/mcp/chatgpt` serve Core.
